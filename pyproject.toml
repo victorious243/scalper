@@ -1,0 +1,20 @@
+[project]
+name = "mt5-forex-ai-bot"
+version = "0.1.0"
+description = "Production-minded, regime-aware MT5 intraday Forex bot with strict risk controls."
+requires-python = ">=3.10"
+readme = "README.md"
+license = { text = "MIT" }
+
+dependencies = [
+  "numpy>=1.24",
+  "pytz>=2024.1",
+  "tomli>=2.0.1; python_version<'3.11'",
+  "MetaTrader5>=5.0.45; platform_system=='Windows'",
+]
+
+[project.optional-dependencies]
+backtest = ["pandas>=2.1"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

@@ -1,0 +1,44 @@
+paper_trading = true
+dry_run = false
+live_enabled = true
+live_acknowledgement = "user_acknowledged_live_test"
+max_positions_per_symbol = 1
+max_daily_trades = 3
+max_daily_loss = 0.02
+max_consecutive_losses = 2
+slippage_points = 2.0
+spread_filter_multiplier = 1.0
+news_risk_window_minutes = 30
+news_window_pre_minutes = 15
+news_window_post_minutes = 15
+news_schedule_path = "configs/news_schedule.json"
+trade_cooldown_minutes = 20
+drawdown_kill_switch = 0.05
+default_timezone = "Europe/Dublin"
+
+[[sessions]]
+name = "LONDON"
+start = "07:00"
+end = "11:30"
+
+[[sessions]]
+name = "NY_OVERLAP"
+start = "12:30"
+end = "16:00"
+
+[[symbols]]
+symbol = "EURUSD"
+spread_mode = "pips"
+max_spread = 1.5
+min_spread_checks = 3
+spread_spike_cooldown_minutes = 15
+min_atr = 0.0005
+max_atr = 0.0040
+min_stop_atr = 0.5
+min_regime_confidence = 0.55
+risk_per_trade = 0.005
+max_daily_loss = 0.02
+max_trades_per_day = 1
+max_consecutive_losses = 2
+min_rr = 1.3
+news_sensitivity = "high"

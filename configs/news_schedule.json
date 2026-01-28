@@ -1,0 +1,10 @@
+{
+  "events": [
+    {
+      "time": "2026-01-28T13:30:00Z",
+      "impact": "high",
+      "symbols": ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"],
+      "title": "US High-Impact News (example)"
+    }
+  ]
+}

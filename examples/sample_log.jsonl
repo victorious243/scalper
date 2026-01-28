@@ -1,0 +1,3 @@
+{"time":"2026-01-28T14:00:00Z","level":"INFO","name":"bot","message":"market_state","symbol":"EURUSD","regime":"TREND","vol":0.0012,"session":"LONDON_NY"}
+{"time":"2026-01-28T14:00:00Z","level":"INFO","name":"bot","message":"no_trade","symbol":"EURUSD","reason":"no_signal"}
+{"time":"2026-01-28T14:15:00Z","level":"INFO","name":"bot","message":"order_result","symbol":"EURUSD","strategy":"trend_pullback","side":"BUY","volume":0.05,"status":"FILLED","message":"Paper fill","success":true}

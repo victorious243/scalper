@@ -89,11 +89,31 @@ class PaperBroker:
         return OrderResult(True, position_id, "CLOSED", "Paper close")
 
     def symbol_info(self, symbol: str) -> dict:
+        symbol_upper = (symbol or "").upper()
+        contract_size = 100000.0
+        point = 0.0001
+        digits = 5
+        if "JPY" in symbol_upper:
+            point = 0.001
+            digits = 3
+        if "XAU" in symbol_upper:
+            contract_size = 100.0
+            point = 0.01
+            digits = 2
+        if "XAG" in symbol_upper:
+            contract_size = 5000.0
+            point = 0.01
+            digits = 2
+        tick_size = point
+        tick_value = contract_size * tick_size
         return {
-            "point": 0.0001,
-            "digits": 5,
-            "trade_contract_size": 100000,
+            "point": point,
+            "digits": digits,
+            "trade_contract_size": contract_size,
+            "trade_tick_size": tick_size,
+            "trade_tick_value": tick_value,
             "volume_min": 0.01,
+            "volume_max": 100.0,
             "volume_step": 0.01,
             "trade_stops_level": 10,
             "trade_freeze_level": 0,

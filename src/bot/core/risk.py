@@ -144,6 +144,7 @@ class HardRiskManager:
                 return RiskDecision(False, "drawdown_kill_switch")
 
         min_lot = float(symbol_info.get("volume_min", 0.01))
+        max_lot = float(symbol_info.get("volume_max", 100.0))
         step = float(symbol_info.get("volume_step", 0.01))
         if cfg.min_lot_override:
             min_lot = cfg.min_lot_override
@@ -167,7 +168,6 @@ class HardRiskManager:
             if freeze_level and (signal.stop_loss - signal.entry_price) < freeze_level:
                 return RiskDecision(False, "freeze_level")
 
-        contract_size = float(symbol_info.get("trade_contract_size", 100000))
         risk_amount = info.equity * cfg.risk_per_trade
         stop_distance = abs(signal.entry_price - signal.stop_loss)
         if stop_distance <= 0:
@@ -175,8 +175,17 @@ class HardRiskManager:
         if stop_distance < cfg.min_stop_atr * state.volatility:
             return RiskDecision(False, "stop_too_tight_atr")
 
-        raw_volume = risk_amount / (stop_distance * contract_size)
-        volume = max(min_lot, round(raw_volume / step) * step)
+        tick_size = float(symbol_info.get("trade_tick_size", 0.0))
+        tick_value = float(symbol_info.get("trade_tick_value", 0.0))
+        if tick_size <= 0 or tick_value <= 0:
+            return RiskDecision(False, "missing_tick_value")
+        ticks_to_sl = stop_distance / tick_size
+        loss_per_1lot = ticks_to_sl * tick_value
+        if loss_per_1lot <= 0:
+            return RiskDecision(False, "invalid_tick_value")
+        raw_volume = risk_amount / loss_per_1lot
+        stepped = (raw_volume // step) * step
+        volume = max(min_lot, min(max_lot, stepped))
 
         if volume < min_lot:
             return RiskDecision(False, "volume_below_min")
@@ -254,4 +263,6 @@ class HardRiskManager:
             "invalid_stop_distance": "Invalid stop distance",
             "stop_too_tight_atr": "Stop loss too tight vs ATR",
             "volume_below_min": "Calculated volume below broker minimum",
+            "missing_tick_value": "Symbol tick value/size not available",
+            "invalid_tick_value": "Invalid tick sizing inputs",
         }.get(code, code)

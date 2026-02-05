@@ -51,6 +51,17 @@ class BotEngine:
         self.trade_book = TradeBook()
         self.journal = TradeJournal()
 
+    def _journal_decision(self, now: datetime, symbol: str, action: str, reason: str, **extra) -> None:
+        self.journal.write(
+            {
+                "time": now.isoformat(),
+                "symbol": symbol,
+                "action": action,
+                "reason": reason,
+                **extra,
+            }
+        )
+
     def run_once(self, now: datetime) -> None:
         if not health_check(self.adapter, self.logger):
             return
@@ -60,6 +71,7 @@ class BotEngine:
             bars_m15 = self.adapter.get_bars(symbol, "M15", 200)
             bars_h1 = self.adapter.get_bars(symbol, "H1", 200)
             if len(bars_m15) < 50 or len(bars_h1) < 50:
+                self._journal_decision(now, symbol, "skip", "insufficient_bars")
                 continue
 
             context = {}
@@ -81,11 +93,13 @@ class BotEngine:
             if self.news.in_risk_window(now, symbol=symbol, sensitivity=symbol_cfg.news_sensitivity):
                 log_event(self.logger, "no_trade", symbol=symbol, reason="news_window")
                 self.store.insert_event(now.isoformat(), "no_trade", f"{symbol}:news_window")
+                self._journal_decision(now, symbol, "skip", "news_window")
                 continue
 
             if not self.execution.can_open(symbol, self.config.max_positions_per_symbol):
                 log_event(self.logger, "no_trade", symbol=symbol, reason="position_exists")
                 self.store.insert_event(now.isoformat(), "no_trade", f"{symbol}:position_exists")
+                self._journal_decision(now, symbol, "skip", "position_exists")
                 continue
 
             candidates = []
@@ -97,6 +111,7 @@ class BotEngine:
             if not candidates:
                 log_event(self.logger, "no_trade", symbol=symbol, reason="no_signal")
                 self.store.insert_event(now.isoformat(), "no_trade", f"{symbol}:no_signal")
+                self._journal_decision(now, symbol, "skip", "no_signal")
                 continue
 
             # Pick best candidate by confidence within symbol
@@ -107,12 +122,14 @@ class BotEngine:
             if not ml_decision.approved:
                 log_event(self.logger, "no_trade", symbol=symbol, reason="ml_filter", score=ml_decision.score)
                 self.store.insert_event(now.isoformat(), "no_trade", f"{symbol}:ml_filter")
+                self._journal_decision(now, symbol, "skip", "ml_filter", score=ml_decision.score)
                 continue
 
             risk_decision = self.risk.approve(signal, state)
             if not risk_decision.approved:
                 log_event(self.logger, "no_trade", symbol=symbol, reason=self.risk.reason_text(risk_decision.reason))
                 self.store.insert_event(now.isoformat(), "no_trade", f"{symbol}:{risk_decision.reason}")
+                self._journal_decision(now, symbol, "skip", risk_decision.reason)
                 continue
 
             candidate_pool.append((signal, state, risk_decision, ml_decision.score))
@@ -123,10 +140,12 @@ class BotEngine:
             for signal, _, _, _ in candidate_pool[1:]:
                 log_event(self.logger, "no_trade", symbol=signal.symbol, reason="lower_quality_candidate")
                 self.store.insert_event(now.isoformat(), "no_trade", f"{signal.symbol}:lower_quality_candidate")
+                self._journal_decision(now, signal.symbol, "skip", "lower_quality_candidate")
 
             if self.config.dry_run:
                 log_event(self.logger, "dry_run", symbol=best_signal.symbol, reason="dry_run_enabled")
                 self.store.insert_event(now.isoformat(), "no_trade", f"{best_signal.symbol}:dry_run")
+                self._journal_decision(now, best_signal.symbol, "skip", "dry_run_enabled")
             else:
                 result = self.execution.place(best_signal, best_risk.adjusted_size)
                 self.execution.log_result(best_signal, result, best_risk.adjusted_size)
@@ -160,6 +179,15 @@ class BotEngine:
                         contract_size=contract_size,
                     )
                     self.trade_book.register_open(result.broker_order_id, trade)
+                    self._journal_decision(
+                        now,
+                        best_signal.symbol,
+                        "enter",
+                        "approved",
+                        strategy=best_signal.strategy,
+                        volume=best_risk.adjusted_size,
+                        rr=best_signal.rr,
+                    )
 
                 self.store.insert_event(now.isoformat(), "order", f"{best_signal.strategy}:{result.status}")
 

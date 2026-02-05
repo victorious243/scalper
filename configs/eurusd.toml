@@ -1,4 +1,4 @@
-paper_trading = true
+€paper_trading = true
 dry_run = false
 live_enabled = true
 live_acknowledgement = "user_acknowledged_live_test"

@@ -876,23 +876,3 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
       }
    }
 }
-{
-   if(trans.type == TRADE_TRANSACTION_DEAL_ADD && trans.deal > 0)
-   {
-      long entry = (long)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
-      if(entry == DEAL_ENTRY_OUT)
-      {
-         double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
-         if(profit < 0)
-         {
-            g_last_loss_time = TimeCurrent();
-            g_session_losses++;
-            if(g_session_losses >= 2)
-            {
-               // lock for 6 hours (safe deterministic future time)
-               g_session_lock_until = TimeCurrent() + 6 * 3600;
-            }
-         }
-      }
-   }
-}

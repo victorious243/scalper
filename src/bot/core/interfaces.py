@@ -25,7 +25,13 @@ class BrokerAdapter(Protocol):
 
 class Strategy(Protocol):
     name: str
-    def generate(self, state: MarketState, bars_m15: List[Bar], bars_h1: List[Bar]) -> Optional[Signal]: ...
+    def generate(
+        self,
+        state: MarketState,
+        bars_m15: List[Bar],
+        bars_h1: List[Bar],
+        context: Optional[dict] = None,
+    ) -> Optional[Signal]: ...
 
 
 class RiskManager(Protocol):

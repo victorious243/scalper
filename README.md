@@ -52,6 +52,14 @@ pip install -e .
   Use `spread_mode = "points"` for metals.
 Risk per trade should stay in the 0.25%–1.0% range.
 
+## Supply & Demand Strategy (Feature-Flagged)
+Enable by setting in your TOML:
+```
+enable_supply_demand = true
+supply_demand_config_path = "configs/supply_demand.json"
+```
+When disabled, the bot runs exactly as before.
+
 ## Recommended Spread Calibration
 1) Run **dry-run** for 1 week and log real spreads during sessions.
 2) Set `max_spread` to a realistic percentile (e.g., 80–90th) for each symbol.
@@ -75,6 +83,11 @@ python -m bot.cli --config configs/eurusd.toml --mode dry-run
 python -m bot.cli --config configs/eurusd.toml --mode live
 ```
 Live mode requires `live_enabled = true` and a non-empty `live_acknowledgement` in the config.
+
+## Supply & Demand Backtest (Minimal)
+```
+python -m bot.backtest.snd_backtest --config configs/supply_demand.json --symbol EURUSD --ltf_csv path/to/m15.csv --htf_csv path/to/h4.csv
+```
 
 ## Backtesting
 Provide M15 CSV data with columns: `time,open,high,low,close,volume`.
@@ -112,3 +125,10 @@ Provide `configs/news_schedule.json` with high-impact events (ISO timestamps). E
 ## Notes
 - ML hook lives in `src/bot/ml/filter.py` and defaults to rules-only.
 - LLM or agent tooling should be used for reporting only.
+
+## Debug Checklist
+- MT5 terminal running and logged in (green bars).
+- `.env` exists and `MT5_TERMINAL_PATH` points to `terminal64.exe`.
+- `enable_supply_demand = true` and JSON config path is valid.
+- Check `logs/bot.log` for `snd_zones` and `snd_skip` reasons.
+- Ensure session windows match `Europe/Dublin`.

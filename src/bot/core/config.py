@@ -48,6 +48,8 @@ class BotConfig:
     dry_run: bool = False
     live_enabled: bool = False
     live_acknowledgement: str = ""
+    enable_supply_demand: bool = False
+    supply_demand_config_path: Optional[str] = None
     max_positions_per_symbol: int = 1
     max_daily_trades: int = 3
     max_daily_loss: float = 0.02
@@ -112,6 +114,8 @@ def load_config(path: str) -> BotConfig:
         dry_run=bool(raw.get("dry_run", False)),
         live_enabled=bool(raw.get("live_enabled", False)),
         live_acknowledgement=str(raw.get("live_acknowledgement", "")),
+        enable_supply_demand=bool(raw.get("enable_supply_demand", False)),
+        supply_demand_config_path=raw.get("supply_demand_config_path"),
         max_positions_per_symbol=int(raw.get("max_positions_per_symbol", 1)),
         max_daily_trades=int(raw.get("max_daily_trades", 3)),
         max_daily_loss=float(raw.get("max_daily_loss", 0.02)),

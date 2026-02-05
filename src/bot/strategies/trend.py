@@ -13,7 +13,7 @@ class TrendStrategy:
         self.min_trend = min_trend
         self.rr = rr
 
-    def generate(self, state: MarketState, bars_m15: List[Bar], bars_h1: List[Bar]) -> Optional[Signal]:
+    def generate(self, state: MarketState, bars_m15: List[Bar], bars_h1: List[Bar], context: Optional[dict] = None) -> Optional[Signal]:
         if state.regime_primary != Regime.TREND:
             return None
         if not bars_m15 or not bars_h1:

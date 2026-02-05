@@ -1,0 +1,34 @@
+{
+  "enable": true,
+  "htf_timeframes": ["H4"],
+  "ltf_timeframe": "M15",
+  "scan_on_close": true,
+  "top_k_zones": 3,
+  "allow_neutral_trend": false,
+  "allow_blind_entries": false,
+  "sl_buffer_atr": 0.3,
+  "sl_buffer_pips": 6.0,
+  "sl_buffer_spread_mult": 1.5,
+  "min_rr": 2.0,
+  "partial_tp": true,
+  "partial_tp_rr": 1.0,
+  "partial_tp_pct": 0.5,
+  "confirmation": {
+    "require_bos": true,
+    "require_rejection": false,
+    "require_nested_zone": false,
+    "wick_body_ratio": 2.0,
+    "swing_lookback": 5
+  },
+  "zone": {
+    "base_min": 1,
+    "base_max": 4,
+    "impulsive_min_candles": 2,
+    "impulse_atr_mult": 1.5,
+    "impulse_min_pips": 8.0,
+    "max_base_atr_mult": 1.0,
+    "max_touches": 2,
+    "overlap_threshold": 0.4,
+    "zone_body_rule": "body"
+  }
+}

@@ -16,6 +16,9 @@ from bot.db.sqlite_store import SQLiteStore
 from bot.ml.filter import MLFilter
 from bot.strategies.trend import TrendStrategy
 from bot.strategies.range import RangeStrategy
+from bot.strategies.supply_demand_strategy import SupplyDemandStrategy
+from bot.snd.config import load_supply_demand_config
+from bot.storage.trade_journal import TradeJournal
 from bot.utils.logging import log_event
 
 
@@ -40,7 +43,13 @@ class BotEngine:
         self.news.load_schedule(config.news_schedule_path)
         self.ml_filter = ml_filter or MLFilter()
         self.strategies = [TrendStrategy(), RangeStrategy()]
+        self.sd_cfg = None
+        if config.enable_supply_demand:
+            self.sd_cfg = load_supply_demand_config(config.supply_demand_config_path)
+            self.sd_cfg.enable = True
+            self.strategies.append(SupplyDemandStrategy(self.sd_cfg))
         self.trade_book = TradeBook()
+        self.journal = TradeJournal()
 
     def run_once(self, now: datetime) -> None:
         if not health_check(self.adapter, self.logger):
@@ -52,6 +61,19 @@ class BotEngine:
             bars_h1 = self.adapter.get_bars(symbol, "H1", 200)
             if len(bars_m15) < 50 or len(bars_h1) < 50:
                 continue
+
+            context = {}
+            if self.config.enable_supply_demand and self.sd_cfg:
+                bars_by_tf = {"M15": bars_m15, "H1": bars_h1}
+                for tf in self.sd_cfg.htf_timeframes + [self.sd_cfg.ltf_timeframe]:
+                    if tf not in bars_by_tf:
+                        bars_by_tf[tf] = self.adapter.get_bars(symbol, tf, 300)
+                context = {
+                    "bars": bars_by_tf,
+                    "symbol_info": self.adapter.symbol_info(symbol),
+                    "logger": self.logger,
+                    "journal": self.journal,
+                }
 
             state = self.observer.evaluate(symbol, bars_m15, bars_h1, now)
             log_event(self.logger, "market_state", symbol=symbol, regime=state.regime_primary.value, vol=state.volatility, session=state.session)
@@ -68,7 +90,7 @@ class BotEngine:
 
             candidates = []
             for strat in self.strategies:
-                signal = strat.generate(state, bars_m15, bars_h1)
+                signal = strat.generate(state, bars_m15, bars_h1, context=context)
                 if signal:
                     candidates.append(signal)
 

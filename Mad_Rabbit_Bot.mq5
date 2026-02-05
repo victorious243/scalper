@@ -194,9 +194,9 @@ bool SymbolEnabled()
 
 bool SymbolInWhitelist()
 {
-   string sym = StringUpper(_Symbol);
-   string list = StringUpper(Allowed_Symbols);
-   list = StringReplace(list, " ", "");
+   string sym = StringToUpper(_Symbol);
+   string list = StringToUpper(Allowed_Symbols);
+   StringReplace(list, " ", "");
    int p = 0;
    while(true)
    {
@@ -546,7 +546,9 @@ void ManageOpenPositions()
 
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      if(!PositionSelectByIndex(i)) continue;
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
 
       string sym = PositionGetString(POSITION_SYMBOL);
       if(sym != _Symbol) continue;
@@ -833,16 +835,21 @@ void OnTick()
 
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &req, const MqlTradeResult &res)
 {
-   if(trans.type == TRADE_TRANSACTION_DEAL_ADD && trans.entry == DEAL_ENTRY_OUT)
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD && trans.deal > 0)
    {
-      if(trans.profit < 0)
+      long entry = (long)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+      if(entry == DEAL_ENTRY_OUT)
       {
-         g_last_loss_time = TimeCurrent();
-         g_session_losses++;
-         if(g_session_losses >= 2)
+         double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
+         if(profit < 0)
          {
-            // lock for 6 hours (safe deterministic future time)
-            g_session_lock_until = TimeCurrent() + 6 * 3600;
+            g_last_loss_time = TimeCurrent();
+            g_session_losses++;
+            if(g_session_losses >= 2)
+            {
+               // lock for 6 hours (safe deterministic future time)
+               g_session_lock_until = TimeCurrent() + 6 * 3600;
+            }
          }
       }
    }

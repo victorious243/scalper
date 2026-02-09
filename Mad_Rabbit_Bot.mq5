@@ -28,6 +28,7 @@ input int    ATR_Period              = 14;
 input int    EMA_Slope_Period        = 50;
 input int    EMA_Slope_Lookback      = 5;
 input double EMA_Slope_Threshold     = 5.0;   // pips over lookback
+input ENUM_TIMEFRAMES Analysis_Timeframe = PERIOD_M30;
 
 input double Min_SL_Pips             = 30.0;
 input double Max_SL_Pips             = 40.0;
@@ -40,6 +41,12 @@ input double Max_Spread_Pips_FX      = 2.0;
 input double ATR_Min_Pips            = 10.0;
 input double ATR_Max_Pips            = 200.0;
 input int    ATR_Regime_Period       = 20;
+input bool   Enable_Adaptive_Filters = true;
+input int    Adaptive_ATR_Lookback_Bars = 120;
+input double Adaptive_ATR_Min_Percentile = 20.0;
+input double Adaptive_ATR_Max_Percentile = 90.0;
+input int    Adaptive_Spread_Lookback = 120;
+input double Adaptive_Spread_Max_Mult = 1.5;
 
 input bool   Trade_London_Session    = true;
 input bool   Trade_NY_Session        = true;
@@ -53,6 +60,10 @@ input double Asian_Risk_Multiplier    = 0.5;
 
 input int    Confidence_Threshold_Metals = 75;
 input int    Confidence_Threshold_FX     = 70;
+input bool   Enable_DD_Throttle      = true;
+input double DD_Throttle_Start_Pct   = 2.0;
+input double DD_Throttle_Full_Pct    = 8.0;
+input int    DD_Threshold_Bump_Max   = 12;
 
 // Allocation multipliers (per symbol)
 input double Risk_Multiplier_XAU      = 1.0;  // 50% portfolio focus
@@ -80,6 +91,24 @@ input string Telegram_Chat_ID         = "";
 input bool   Telegram_Test_OnInit     = true;
 input int    Telegram_Min_IntervalSec = 30;
 
+// AI signal bridge (HTTP polling)
+input bool   Enable_AI_Signals        = false;
+input bool   AI_Use_Only_Mode         = true;
+enum AIProvider { AI_PROVIDER_RELAY=0, AI_PROVIDER_OPENAI=1 };
+input AIProvider AI_Provider          = AI_PROVIDER_RELAY;
+input string AI_Endpoint              = "";
+input string AI_API_Key               = "";
+input string AI_OpenAI_URL            = "https://api.openai.com/v1/chat/completions";
+input string AI_OpenAI_Model          = "gpt-4o-mini";
+input string AI_OpenAI_System_Prompt  = "You are a cautious trading signal engine. Return strict JSON only with keys: id,symbol,signal,confidence,sl,tp,expires_unix,reason.";
+input int    AI_Poll_Seconds          = 300;   // 5 minutes
+input int    AI_HTTP_Timeout_Ms       = 5000;
+input int    AI_Min_Confidence        = 70;
+input int    AI_Signal_TTL_Seconds    = 900;   // fallback TTL if API does not send expiry
+input bool   Enable_AI_Advisory       = true;
+input double AI_Advisory_Weight       = 0.35;
+input int    AI_Advisory_Opposite_Penalty = 12;
+
 
 // Trade management (optional)
 input bool   Enable_Trade_Management   = true;
@@ -92,7 +121,7 @@ input bool   Enable_Trailing           = true;
 input double Trail_Start_RR            = 1.5;   // start trailing at >= this RR
 input double Trail_Step_Pips           = 10.0;  // trail step (pips)
 
-// Support/Resistance caching (H1)
+// Support/Resistance caching (analysis timeframe)
 input int    SR_Lookback_Bars          = 200;
 input int    SR_Pivot_Left            = 2;
 input int    SR_Pivot_Right           = 2;
@@ -116,6 +145,48 @@ int g_last_score = 0;
 string g_last_regime = "UNKNOWN";
 string g_last_lock_reason = "";
 datetime g_last_telegram_time = 0;
+datetime g_last_ai_poll_time = 0;
+string g_last_ai_signal_id = "";
+string g_last_ai_executed_id = "";
+string g_last_ai_signal = "NONE";
+double g_last_ai_confidence = 0.0;
+string g_last_ai_reason = "";
+string g_last_ai_status = "DISABLED";
+bool g_ai_advisory_ready = false;
+string g_ai_advisory_id = "";
+string g_ai_advisory_signal = "NONE";
+double g_ai_advisory_confidence = 0.0;
+double g_ai_advisory_sl = 0.0;
+double g_ai_advisory_tp = 0.0;
+datetime g_ai_advisory_expires = 0;
+string g_ai_advisory_reason = "";
+double g_dynamic_atr_min = 0.0;
+double g_dynamic_atr_max = 0.0;
+double g_dynamic_spread_max = 0.0;
+double g_spread_hist[];
+
+struct ScoreBreakdown
+{
+   int rsi;
+   int macd;
+   int sr;
+   int candle;
+   int atr;
+   int total;
+};
+
+struct AISignal
+{
+   bool valid;
+   string id;
+   string symbol;
+   string signal;
+   double confidence;
+   double sl;
+   double tp;
+   datetime expires_time;
+   string reason;
+};
 
 int rsi_handle = INVALID_HANDLE;
 int macd_handle = INVALID_HANDLE;
@@ -172,6 +243,487 @@ string RemoveSpacesCopy(const string text)
       if(c != ' ') out += (string)CharToString((uchar)c);
    }
    return out;
+}
+
+string TimeframeTag(const ENUM_TIMEFRAMES tf)
+{
+   if(tf == PERIOD_M1) return "M1";
+   if(tf == PERIOD_M5) return "M5";
+   if(tf == PERIOD_M15) return "M15";
+   if(tf == PERIOD_M30) return "M30";
+   if(tf == PERIOD_H1) return "H1";
+   if(tf == PERIOD_H4) return "H4";
+   if(tf == PERIOD_D1) return "D1";
+   string t = EnumToString(tf);
+   StringReplace(t, "PERIOD_", "");
+   return t;
+}
+
+string TrimCopy(const string text)
+{
+   int start = 0;
+   int end = StringLen(text) - 1;
+   while(start <= end)
+   {
+      ushort c = StringGetCharacter(text, start);
+      if(c == ' ' || c == '\t' || c == '\r' || c == '\n') start++;
+      else break;
+   }
+   while(end >= start)
+   {
+      ushort c = StringGetCharacter(text, end);
+      if(c == ' ' || c == '\t' || c == '\r' || c == '\n') end--;
+      else break;
+   }
+   if(end < start) return "";
+   return StringSubstr(text, start, end - start + 1);
+}
+
+string EscapeJson(const string text)
+{
+   string out = "";
+   for(int i = 0; i < StringLen(text); i++)
+   {
+      ushort c = StringGetCharacter(text, i);
+      if(c == '\\') out += "\\\\";
+      else if(c == '\"') out += "\\\"";
+      else if(c == '\n') out += "\\n";
+      else if(c == '\r') out += "\\r";
+      else if(c == '\t') out += "\\t";
+      else out += (string)CharToString((uchar)c);
+   }
+   return out;
+}
+
+bool JsonGetStringValue(const string json, const string key, string &value)
+{
+   string pattern = "\"" + key + "\"";
+   int k = StringFind(json, pattern);
+   if(k < 0) return false;
+   int c = StringFind(json, ":", k + StringLen(pattern));
+   if(c < 0) return false;
+   int q1 = StringFind(json, "\"", c + 1);
+   if(q1 < 0) return false;
+   string out = "";
+   bool escaped = false;
+   for(int i = q1 + 1; i < StringLen(json); i++)
+   {
+      ushort ch = StringGetCharacter(json, i);
+      if(escaped)
+      {
+         if(ch == 'n') out += "\n";
+         else if(ch == 'r') out += "\r";
+         else if(ch == 't') out += "\t";
+         else out += (string)CharToString((uchar)ch);
+         escaped = false;
+         continue;
+      }
+      if(ch == '\\')
+      {
+         escaped = true;
+         continue;
+      }
+      if(ch == '\"')
+      {
+         value = out;
+         return true;
+      }
+      out += (string)CharToString((uchar)ch);
+   }
+   return false;
+}
+
+bool JsonGetNumberValue(const string json, const string key, double &value)
+{
+   string pattern = "\"" + key + "\"";
+   int k = StringFind(json, pattern);
+   if(k < 0) return false;
+   int c = StringFind(json, ":", k + StringLen(pattern));
+   if(c < 0) return false;
+   int s = c + 1;
+   while(s < StringLen(json))
+   {
+      ushort ch = StringGetCharacter(json, s);
+      if(ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') s++;
+      else break;
+   }
+   int e = s;
+   while(e < StringLen(json))
+   {
+      ushort ch = StringGetCharacter(json, e);
+      if(ch == ',' || ch == '}' || ch == ' ' || ch == '\r' || ch == '\n' || ch == '\t') break;
+      e++;
+   }
+   if(e <= s) return false;
+   string raw = TrimCopy(StringSubstr(json, s, e - s));
+   if(raw == "") return false;
+   value = StringToDouble(raw);
+   return true;
+}
+
+AISignal EmptyAISignal()
+{
+   AISignal s;
+   s.valid = false;
+   s.id = "";
+   s.symbol = "";
+   s.signal = "NO_TRADE";
+   s.confidence = 0.0;
+   s.sl = 0.0;
+   s.tp = 0.0;
+   s.expires_time = 0;
+   s.reason = "";
+   return s;
+}
+
+string ExtractJsonObject(const string text)
+{
+   int start = StringFind(text, "{");
+   if(start < 0) return text;
+   int end = -1;
+   for(int i = StringLen(text) - 1; i >= 0; i--)
+   {
+      if(StringGetCharacter(text, i) == '}')
+      {
+         end = i;
+         break;
+      }
+   }
+   if(end <= start) return text;
+   return StringSubstr(text, start, end - start + 1);
+}
+
+double ClampDouble(const double value, const double min_value, const double max_value)
+{
+   if(value < min_value) return min_value;
+   if(value > max_value) return max_value;
+   return value;
+}
+
+double CurrentDrawdownPct()
+{
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity > g_peak_equity) g_peak_equity = equity;
+   if(g_peak_equity <= 0.0) return 0.0;
+   return (g_peak_equity - equity) / g_peak_equity * 100.0;
+}
+
+double PercentileFromArray(const double &src[], const int count, const double pct)
+{
+   if(count <= 0) return 0.0;
+   double sorted[];
+   ArrayResize(sorted, count);
+   for(int i = 0; i < count; i++) sorted[i] = src[i];
+   ArraySort(sorted);
+
+   double p = ClampDouble(pct, 0.0, 100.0) / 100.0;
+   double pos = (count - 1) * p;
+   int lo = (int)MathFloor(pos);
+   int hi = (int)MathCeil(pos);
+   if(lo == hi) return sorted[lo];
+   double weight = pos - lo;
+   return sorted[lo] + (sorted[hi] - sorted[lo]) * weight;
+}
+
+void RecordSpreadSample()
+{
+   double spread = GetSpreadInPips(_Symbol);
+   if(spread <= 0.0) return;
+   int n = ArraySize(g_spread_hist);
+   if(n < Adaptive_Spread_Lookback)
+   {
+      ArrayResize(g_spread_hist, n + 1);
+      g_spread_hist[n] = spread;
+      return;
+   }
+   for(int i = 1; i < n; i++) g_spread_hist[i - 1] = g_spread_hist[i];
+   g_spread_hist[n - 1] = spread;
+}
+
+void RefreshAdaptiveLimits()
+{
+   g_dynamic_spread_max = IsMetals() ? Max_Spread_Pips_Metals : Max_Spread_Pips_FX;
+   g_dynamic_atr_min = ATR_Min_Pips;
+   g_dynamic_atr_max = ATR_Max_Pips;
+   if(!Enable_Adaptive_Filters) return;
+
+   RecordSpreadSample();
+   int sCount = ArraySize(g_spread_hist);
+   if(sCount >= 20)
+   {
+      double p75 = PercentileFromArray(g_spread_hist, sCount, 75.0);
+      g_dynamic_spread_max = MathMax(g_dynamic_spread_max, p75 * Adaptive_Spread_Max_Mult);
+   }
+
+   if(atr_handle == INVALID_HANDLE) return;
+   int lookback = MathMin(MathMax(Adaptive_ATR_Lookback_Bars, 20), 500);
+   double atr_raw[];
+   ArrayResize(atr_raw, lookback);
+   int got = CopyBuffer(atr_handle, 0, 1, lookback, atr_raw);
+   if(got < 20) return;
+
+   double atr_pips_hist[];
+   ArrayResize(atr_pips_hist, got);
+   double pip = PipSize(_Symbol);
+   if(pip <= 0.0) return;
+   for(int i = 0; i < got; i++) atr_pips_hist[i] = atr_raw[i] / pip;
+
+   double pLow = PercentileFromArray(atr_pips_hist, got, Adaptive_ATR_Min_Percentile);
+   double pHigh = PercentileFromArray(atr_pips_hist, got, Adaptive_ATR_Max_Percentile);
+   g_dynamic_atr_min = MathMax(0.1, MathMin(ATR_Min_Pips, pLow));
+   g_dynamic_atr_max = MathMax(ATR_Max_Pips, pHigh);
+   if(g_dynamic_atr_min >= g_dynamic_atr_max)
+   {
+      g_dynamic_atr_min = ATR_Min_Pips;
+      g_dynamic_atr_max = ATR_Max_Pips;
+   }
+}
+
+int DynamicThresholdBump()
+{
+   if(!Enable_DD_Throttle) return 0;
+   double dd = CurrentDrawdownPct();
+   if(dd <= DD_Throttle_Start_Pct) return 0;
+   double full = MathMax(DD_Throttle_Full_Pct, DD_Throttle_Start_Pct + 0.1);
+   double ratio = ClampDouble((dd - DD_Throttle_Start_Pct) / (full - DD_Throttle_Start_Pct), 0.0, 1.0);
+   int ddBump = (int)MathRound(ratio * DD_Threshold_Bump_Max);
+   int lossBump = MathMin(6, g_session_losses * 2);
+   return ddBump + lossBump;
+}
+
+int DynamicScoreThreshold(const int base)
+{
+   return base + DynamicThresholdBump();
+}
+
+int DynamicAIMinConfidence()
+{
+   return DynamicScoreThreshold(AI_Min_Confidence);
+}
+
+double RiskThrottleMultiplier()
+{
+   if(!Enable_DD_Throttle) return 1.0;
+   double dd = CurrentDrawdownPct();
+   if(dd <= DD_Throttle_Start_Pct) return 1.0;
+   double full = MathMax(DD_Throttle_Full_Pct, DD_Throttle_Start_Pct + 0.1);
+   double ratio = ClampDouble((dd - DD_Throttle_Start_Pct) / (full - DD_Throttle_Start_Pct), 0.0, 1.0);
+   // reduce risk linearly down to 50% under stress
+   return 1.0 - (0.5 * ratio);
+}
+
+bool ParseAISignalFromJson(const string raw, datetime now, AISignal &sig)
+{
+   string rawSignal = "";
+   string rawId = "";
+   string rawSymbol = "";
+   string rawReason = "";
+   double confidence = 0.0;
+   double sl = 0.0;
+   double tp = 0.0;
+   double expires_unix = 0.0;
+
+   string body = ExtractJsonObject(raw);
+   if(!JsonGetStringValue(body, "signal", rawSignal))
+   {
+      g_last_ai_status = "PARSE_SIGNAL_FAIL";
+      return false;
+   }
+   JsonGetStringValue(body, "id", rawId);
+   JsonGetStringValue(body, "symbol", rawSymbol);
+   JsonGetStringValue(body, "reason", rawReason);
+   JsonGetNumberValue(body, "confidence", confidence);
+   JsonGetNumberValue(body, "sl", sl);
+   JsonGetNumberValue(body, "tp", tp);
+   JsonGetNumberValue(body, "expires_unix", expires_unix);
+
+   string signal = ToUpperCopy(TrimCopy(rawSignal));
+   string symbol = (rawSymbol == "") ? _Symbol : rawSymbol;
+   string id = (rawId == "") ? IntegerToString((int)now) + "_" + signal : rawId;
+
+   g_last_ai_signal = signal;
+   g_last_ai_signal_id = id;
+   g_last_ai_confidence = confidence;
+   g_last_ai_reason = rawReason;
+
+   if(signal == "NO_TRADE")
+   {
+      g_last_ai_status = "AI_NO_TRADE";
+      return false;
+   }
+   if(signal != "BUY" && signal != "SELL")
+   {
+      g_last_ai_status = "BAD_SIGNAL";
+      return false;
+   }
+   if(ToUpperCopy(symbol) != ToUpperCopy(_Symbol))
+   {
+      g_last_ai_status = "SYMBOL_MISMATCH";
+      return false;
+   }
+   if(confidence < DynamicAIMinConfidence())
+   {
+      g_last_ai_status = "LOW_CONFIDENCE";
+      return false;
+   }
+
+   datetime expiry = now + AI_Signal_TTL_Seconds;
+   if(expires_unix > 0) expiry = (datetime)((long)expires_unix);
+
+   sig.valid = true;
+   sig.id = id;
+   sig.symbol = symbol;
+   sig.signal = signal;
+   sig.confidence = confidence;
+   sig.sl = sl;
+   sig.tp = tp;
+   sig.expires_time = expiry;
+   sig.reason = rawReason;
+   g_last_ai_status = "OK";
+   return true;
+}
+
+bool PollAISignal(AISignal &sig, double atr_pips, double ema_slope_pips)
+{
+   sig = EmptyAISignal();
+   if(!Enable_AI_Signals)
+   {
+      g_last_ai_status = "DISABLED";
+      return false;
+   }
+   if(AI_API_Key == "")
+   {
+      g_last_ai_status = "NO_API_KEY";
+      return false;
+   }
+
+   datetime now = TimeCurrent();
+   if(g_last_ai_poll_time > 0 && (now - g_last_ai_poll_time) < AI_Poll_Seconds)
+   {
+      g_last_ai_status = "WAIT_POLL_WINDOW";
+      return false;
+   }
+   g_last_ai_poll_time = now;
+
+   string endpoint = AI_Endpoint;
+   if(AI_Provider == AI_PROVIDER_OPENAI)
+   {
+      if(endpoint == "") endpoint = AI_OpenAI_URL;
+   }
+   if(endpoint == "")
+   {
+      g_last_ai_status = "NO_ENDPOINT";
+      return false;
+   }
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double spread = GetSpreadInPips(_Symbol);
+   string payload = "";
+   string headers = "Content-Type: application/json\r\n";
+   if(AI_Provider == AI_PROVIDER_OPENAI)
+   {
+      headers += "Authorization: Bearer " + AI_API_Key + "\r\n";
+      string userPrompt = StringFormat(
+         "Return one decision in strict JSON only. symbol=%s time=%s timeframe=%s bid=%.8f ask=%.8f spread_pips=%.2f atr_pips=%.2f ema_slope_pips=%.2f. If no opportunity set signal=NO_TRADE.",
+         _Symbol,
+         TimeToString(now, TIME_DATE|TIME_SECONDS),
+         TimeframeTag(Analysis_Timeframe),
+         bid,
+         ask,
+         spread,
+         atr_pips,
+         ema_slope_pips
+      );
+      payload =
+         "{\"model\":\"" + EscapeJson(AI_OpenAI_Model) + "\","
+         "\"temperature\":0,"
+         "\"messages\":["
+         "{\"role\":\"system\",\"content\":\"" + EscapeJson(AI_OpenAI_System_Prompt) + "\"},"
+         "{\"role\":\"user\",\"content\":\"" + EscapeJson(userPrompt) + "\"}"
+         "]}";
+   }
+   else
+   {
+      headers += "X-API-Key: " + AI_API_Key + "\r\n";
+      payload = StringFormat(
+         "{\"symbol\":\"%s\",\"time\":\"%s\",\"timeframe\":\"%s\",\"bid\":%.8f,\"ask\":%.8f,\"spread_pips\":%.2f,\"atr_pips\":%.2f,\"ema_slope_pips\":%.2f}",
+         _Symbol,
+         TimeToString(now, TIME_DATE|TIME_SECONDS),
+         TimeframeTag(Analysis_Timeframe),
+         bid,
+         ask,
+         spread,
+         atr_pips,
+         ema_slope_pips
+      );
+   }
+
+   char post[];
+   char result[];
+   StringToCharArray(payload, post, 0, WHOLE_ARRAY, CP_UTF8);
+   string response_headers = "";
+   ResetLastError();
+   int code = WebRequest("POST", endpoint, headers, AI_HTTP_Timeout_Ms, post, result, response_headers);
+   if(code == -1)
+   {
+      g_last_ai_status = "HTTP_ERR_" + IntegerToString(GetLastError());
+      return false;
+   }
+   if(code < 200 || code >= 300)
+   {
+      g_last_ai_status = "HTTP_" + IntegerToString(code);
+      return false;
+   }
+
+   string body = CharArrayToString(result, 0, -1, CP_UTF8);
+   if(body == "")
+   {
+      g_last_ai_status = "EMPTY_BODY";
+      return false;
+   }
+
+   if(AI_Provider == AI_PROVIDER_OPENAI)
+   {
+      string content = "";
+      if(!JsonGetStringValue(body, "content", content))
+      {
+         g_last_ai_status = "PARSE_CONTENT_FAIL";
+         return false;
+      }
+      return ParseAISignalFromJson(content, now, sig);
+   }
+   return ParseAISignalFromJson(body, now, sig);
+}
+
+void RefreshAIAdvisoryCache()
+{
+   if(!(Enable_AI_Signals && !AI_Use_Only_Mode && Enable_AI_Advisory)) return;
+   if(AI_API_Key == "") return;
+   if(atr_handle == INVALID_HANDLE || ema_handle == INVALID_HANDLE) return;
+
+   double atr_buff[2];
+   double ema_buff[10];
+   if(CopyBuffer(atr_handle, 0, 0, 2, atr_buff) < 2) return;
+   if(CopyBuffer(ema_handle, 0, 0, EMA_Slope_Lookback + 1, ema_buff) < EMA_Slope_Lookback + 1) return;
+
+   double pip = PipSize(_Symbol);
+   if(pip <= 0.0) return;
+   double atr_pips = atr_buff[1] / pip;
+   double ema_slope_pips = (ema_buff[1] - ema_buff[EMA_Slope_Lookback]) / pip;
+
+   AISignal ai;
+   bool got = PollAISignal(ai, atr_pips, ema_slope_pips);
+   if(!got || !ai.valid) return;
+
+   g_ai_advisory_ready = true;
+   g_ai_advisory_id = ai.id;
+   g_ai_advisory_signal = ai.signal;
+   g_ai_advisory_confidence = ai.confidence;
+   g_ai_advisory_sl = ai.sl;
+   g_ai_advisory_tp = ai.tp;
+   g_ai_advisory_expires = ai.expires_time;
+   g_ai_advisory_reason = ai.reason;
 }
 
 bool TelegramSend(const string msg)
@@ -262,13 +814,16 @@ bool IsAsianSession()
 bool IsSpreadOK()
 {
    double spread = GetSpreadInPips(_Symbol);
-   if(IsMetals()) return spread <= Max_Spread_Pips_Metals;
-   return spread <= Max_Spread_Pips_FX;
+   double maxSpread = g_dynamic_spread_max;
+   if(maxSpread <= 0.0) maxSpread = IsMetals() ? Max_Spread_Pips_Metals : Max_Spread_Pips_FX;
+   return spread <= maxSpread;
 }
 
 bool AtrOk(double atr_pips)
 {
-   return (atr_pips >= ATR_Min_Pips && atr_pips <= ATR_Max_Pips);
+   double minAtr = g_dynamic_atr_min > 0.0 ? g_dynamic_atr_min : ATR_Min_Pips;
+   double maxAtr = g_dynamic_atr_max > 0.0 ? g_dynamic_atr_max : ATR_Max_Pips;
+   return (atr_pips >= minAtr && atr_pips <= maxAtr);
 }
 
 int PositionsDirectionCount(const string symbol, long direction)
@@ -293,9 +848,7 @@ bool DailyLimitsHit()
 
 bool DrawdownHit()
 {
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   if(equity > g_peak_equity) g_peak_equity = equity;
-   double dd = (g_peak_equity - equity) / g_peak_equity * 100.0;
+   double dd = CurrentDrawdownPct();
    return dd >= Max_Drawdown_Pct;
 }
 
@@ -323,8 +876,8 @@ void GetRecentSwings(int lookback, double &swing_high, double &swing_low)
    swing_low = DBL_MAX;
    for(int i=2; i<=lookback; i++)
    {
-      double high = iHigh(_Symbol, PERIOD_H1, i);
-      double low = iLow(_Symbol, PERIOD_H1, i);
+      double high = iHigh(_Symbol, Analysis_Timeframe, i);
+      double low = iLow(_Symbol, Analysis_Timeframe, i);
       if(high > swing_high) swing_high = high;
       if(low < swing_low) swing_low = low;
    }
@@ -332,10 +885,10 @@ void GetRecentSwings(int lookback, double &swing_high, double &swing_low)
 
 bool RejectionCandle(bool buy)
 {
-   double o1 = iOpen(_Symbol, PERIOD_H1, 1);
-   double c1 = iClose(_Symbol, PERIOD_H1, 1);
-   double h1 = iHigh(_Symbol, PERIOD_H1, 1);
-   double l1 = iLow(_Symbol, PERIOD_H1, 1);
+   double o1 = iOpen(_Symbol, Analysis_Timeframe, 1);
+   double c1 = iClose(_Symbol, Analysis_Timeframe, 1);
+   double h1 = iHigh(_Symbol, Analysis_Timeframe, 1);
+   double l1 = iLow(_Symbol, Analysis_Timeframe, 1);
    double body = MathAbs(c1 - o1);
    double upper_wick = h1 - MathMax(o1, c1);
    double lower_wick = MathMin(o1, c1) - l1;
@@ -362,16 +915,6 @@ datetime g_last_sr_update = 0;
 // --- Trade management helpers ---
 ulong  g_magic = 240131; // Mad Rabbit magic number
 
-struct ScoreBreakdown
-{
-   int rsi;
-   int macd;
-   int sr;
-   int candle;
-   int atr;
-   int total;
-};
-
 ScoreBreakdown EmptyScore()
 {
    ScoreBreakdown e;
@@ -394,7 +937,9 @@ ScoreBreakdown GetSetupScore(bool buy, double rsi, double macd_main, double macd
 
    if(rejection) s.candle = 20;
 
-   if(atr_pips >= ATR_Min_Pips && atr_pips <= ATR_Max_Pips) s.atr = 20;
+   double minAtr = g_dynamic_atr_min > 0.0 ? g_dynamic_atr_min : ATR_Min_Pips;
+   double maxAtr = g_dynamic_atr_max > 0.0 ? g_dynamic_atr_max : ATR_Max_Pips;
+   if(atr_pips >= minAtr && atr_pips <= maxAtr) s.atr = 20;
 
    s.total = s.rsi + s.macd + s.sr + s.candle + s.atr;
    return s;
@@ -472,11 +1017,12 @@ void EnsureLogHeader(const string file, const string header)
 
 void LogDecisionCSV(const string action, const ScoreBreakdown &s, double spread_pips, double atr_pips, double ema_slope)
 {
-   EnsureLogHeader(LOG_DECISIONS, "time,symbol,regime,score,total_rsi,macd,sr,candle,atr,spread,ema_slope,lock_reason,action");
-   string line = StringFormat("%s,%s,%s,%d,%d,%d,%d,%d,%d,%.2f,%.2f,%s,%s",
+   EnsureLogHeader(LOG_DECISIONS, "time,symbol,regime,score,total_rsi,macd,sr,candle,atr,spread,ema_slope,lock_reason,action,ai_id,ai_signal,ai_confidence,ai_status,ai_reason");
+   string line = StringFormat("%s,%s,%s,%d,%d,%d,%d,%d,%d,%.2f,%.2f,%s,%s,%s,%s,%.2f,%s,%s",
       TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), _Symbol, g_last_regime,
       s.total, s.rsi, s.macd, s.sr, s.candle, s.atr,
-      spread_pips, ema_slope, g_last_lock_reason, action);
+      spread_pips, ema_slope, g_last_lock_reason, action,
+      g_last_ai_signal_id, g_last_ai_signal, g_last_ai_confidence, g_last_ai_status, g_last_ai_reason);
    LogLine(LOG_DECISIONS, line);
 }
 
@@ -491,8 +1037,8 @@ void LogTradeCSV(const string side, double lot, double entry, double sl, double 
 // ---- Core Trading Logic ----
 void UpdateSRCache()
 {
-   // Recompute zones only on new H1 bar
-   datetime t=iTime(_Symbol, PERIOD_H1, 0);
+   // Recompute zones only on new analysis timeframe bar
+   datetime t=iTime(_Symbol, Analysis_Timeframe, 0);
    if(t==0 || t==g_last_sr_update) return;
    g_last_sr_update = t;
 
@@ -511,19 +1057,19 @@ void UpdateSRCache()
    int max_zones = MathMin(SR_Max_Zones, 10);
    for(int i=maxbars; i>=R+L+2 && g_zone_count<max_zones*2; i--)
    {
-      double hi = iHigh(_Symbol, PERIOD_H1, i);
-      double lo = iLow(_Symbol, PERIOD_H1, i);
+      double hi = iHigh(_Symbol, Analysis_Timeframe, i);
+      double lo = iLow(_Symbol, Analysis_Timeframe, i);
       bool pivotHigh=true, pivotLow=true;
 
-      for(int k=1;k<=L;k++){ if(iHigh(_Symbol, PERIOD_H1, i+k) >= hi) pivotHigh=false; if(iLow(_Symbol, PERIOD_H1, i+k) <= lo) pivotLow=false; }
-      for(int k=1;k<=R;k++){ if(iHigh(_Symbol, PERIOD_H1, i-k) >  hi) pivotHigh=false; if(iLow(_Symbol, PERIOD_H1, i-k) <  lo) pivotLow=false; }
+      for(int k=1;k<=L;k++){ if(iHigh(_Symbol, Analysis_Timeframe, i+k) >= hi) pivotHigh=false; if(iLow(_Symbol, Analysis_Timeframe, i+k) <= lo) pivotLow=false; }
+      for(int k=1;k<=R;k++){ if(iHigh(_Symbol, Analysis_Timeframe, i-k) >  hi) pivotHigh=false; if(iLow(_Symbol, Analysis_Timeframe, i-k) <  lo) pivotLow=false; }
 
       if(pivotHigh && g_zone_count < 20)
       {
          g_zones[g_zone_count].price = hi;
          g_zones[g_zone_count].half_width = half_width;
          g_zones[g_zone_count].is_resistance = true;
-         g_zones[g_zone_count].t = iTime(_Symbol, PERIOD_H1, i);
+         g_zones[g_zone_count].t = iTime(_Symbol, Analysis_Timeframe, i);
          g_zone_count++;
       }
       if(pivotLow && g_zone_count < 20)
@@ -531,7 +1077,7 @@ void UpdateSRCache()
          g_zones[g_zone_count].price = lo;
          g_zones[g_zone_count].half_width = half_width;
          g_zones[g_zone_count].is_resistance = false;
-         g_zones[g_zone_count].t = iTime(_Symbol, PERIOD_H1, i);
+         g_zones[g_zone_count].t = iTime(_Symbol, Analysis_Timeframe, i);
          g_zone_count++;
       }
    }
@@ -653,6 +1199,181 @@ void ManageOpenPositions()
    }
 }
 
+bool EvaluateAI()
+{
+   UpdateDailyCounters();
+   g_last_lock_reason = "";
+
+   UpdateSRCache();
+
+   if(!IsTradeAllowed())
+   {
+      LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), 0.0, 0.0);
+      return true;
+   }
+
+   if(rsi_handle == INVALID_HANDLE || macd_handle == INVALID_HANDLE || atr_handle == INVALID_HANDLE || ema_handle == INVALID_HANDLE)
+   {
+      g_last_lock_reason = "HANDLE_INVALID";
+      LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), 0.0, 0.0);
+      return true;
+   }
+
+   double atr_buff[2];
+   double ema_buff[10];
+   if(CopyBuffer(atr_handle, 0, 0, 2, atr_buff) < 2) return false;
+   if(CopyBuffer(ema_handle, 0, 0, EMA_Slope_Lookback + 1, ema_buff) < EMA_Slope_Lookback + 1) return false;
+
+   double atr_hist[];
+   ArrayResize(atr_hist, ATR_Regime_Period + 2);
+   if(CopyBuffer(atr_handle, 0, 1, ATR_Regime_Period + 1, atr_hist) < ATR_Regime_Period + 1) return false;
+   double atr_sma = 0.0;
+   for(int i = 0; i < ATR_Regime_Period; i++) atr_sma += atr_hist[i];
+   atr_sma /= ATR_Regime_Period;
+
+   double atr_pips = atr_buff[1] / PipSize(_Symbol);
+   double ema_now = ema_buff[1];
+   double ema_prev = ema_buff[EMA_Slope_Lookback];
+   double ema_slope_pips = (ema_now - ema_prev) / PipSize(_Symbol);
+
+   if(!AtrOk(atr_pips))
+   {
+      g_last_lock_reason = "ATR_RANGE";
+      LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
+      return true;
+   }
+   if(IsLowVolRegime(atr_pips, atr_sma / PipSize(_Symbol)))
+   {
+      g_last_regime = "LOW_VOL";
+      g_last_lock_reason = "LOW_VOL";
+      LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
+      return true;
+   }
+   g_last_regime = IsTrendRegime(ema_slope_pips) ? "TREND" : "RANGE";
+
+   AISignal ai;
+   bool got = PollAISignal(ai, atr_pips, ema_slope_pips);
+   if(!got)
+   {
+      if(g_last_ai_status == "WAIT_POLL_WINDOW") return false;
+      g_last_lock_reason = g_last_ai_status;
+      LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
+      return false;
+   }
+   if(!ai.valid) return false;
+
+   if(ai.expires_time > 0 && TimeCurrent() > ai.expires_time)
+   {
+      g_last_ai_status = "SIGNAL_EXPIRED";
+      g_last_lock_reason = "SIGNAL_EXPIRED";
+      LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
+      return true;
+   }
+   if(ai.id == g_last_ai_executed_id)
+   {
+      g_last_ai_status = "DUPLICATE_SIGNAL";
+      g_last_lock_reason = "DUPLICATE_SIGNAL";
+      LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
+      return true;
+   }
+
+   bool buy = (ai.signal == "BUY");
+   bool sell = (ai.signal == "SELL");
+   if(!buy && !sell)
+   {
+      g_last_ai_status = "UNSUPPORTED_SIGNAL";
+      g_last_lock_reason = "UNSUPPORTED_SIGNAL";
+      LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
+      return true;
+   }
+
+   if(buy && PositionsDirectionCount(_Symbol, POSITION_TYPE_BUY) > 0)
+   {
+      g_last_lock_reason = "STACK";
+      LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
+      return true;
+   }
+   if(sell && PositionsDirectionCount(_Symbol, POSITION_TYPE_SELL) > 0)
+   {
+      g_last_lock_reason = "STACK";
+      LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
+      return true;
+   }
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double entry = buy ? ask : bid;
+
+   double sl_pips = MathMax(Min_SL_Pips, MathMin(Max_SL_Pips, atr_pips * 1.2));
+   double tp_pips = MathMax(Min_TP_Pips, MathMin(Max_TP_Pips, sl_pips * Min_RR));
+   double fallback_sl = buy ? (bid - sl_pips * PipSize(_Symbol)) : (ask + sl_pips * PipSize(_Symbol));
+   double fallback_tp = buy ? (bid + tp_pips * PipSize(_Symbol)) : (ask - tp_pips * PipSize(_Symbol));
+
+   double sl = ai.sl > 0 ? ai.sl : fallback_sl;
+   double tp = ai.tp > 0 ? ai.tp : fallback_tp;
+
+   if(buy && (sl >= entry || tp <= entry))
+   {
+      sl = fallback_sl;
+      tp = fallback_tp;
+   }
+   if(sell && (sl <= entry || tp >= entry))
+   {
+      sl = fallback_sl;
+      tp = fallback_tp;
+   }
+
+   double rr = MathAbs(tp - entry) / MathAbs(entry - sl);
+   if(rr < Min_RR)
+   {
+      g_last_ai_status = "RR_TOO_LOW";
+      g_last_lock_reason = "RR_TOO_LOW";
+      LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
+      return true;
+   }
+
+   double risk_pct = Risk_Per_Trade_Pct;
+   if(StringFind(_Symbol, "XAU") >= 0) risk_pct *= Risk_Multiplier_XAU;
+   else if(StringFind(_Symbol, "XAG") >= 0) risk_pct *= Risk_Multiplier_XAG;
+   else risk_pct *= Risk_Multiplier_FX;
+   if(Reduce_Asian_Risk && IsAsianSession()) risk_pct *= Asian_Risk_Multiplier;
+   risk_pct *= RiskThrottleMultiplier();
+
+   double lot = CalculateLotByRisk(entry, sl, risk_pct);
+   if(lot <= 0)
+   {
+      g_last_lock_reason = "LOT_ZERO";
+      LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
+      return true;
+   }
+
+   trade.SetExpertMagicNumber(g_magic);
+   trade.SetDeviationInPoints(10);
+   bool ok = false;
+   if(buy) ok = trade.Buy(lot, _Symbol, ask, sl, tp, "MadRabbit_AI");
+   if(sell) ok = trade.Sell(lot, _Symbol, bid, sl, tp, "MadRabbit_AI");
+
+   ScoreBreakdown aiScore = EmptyScore();
+   aiScore.total = (int)MathRound(ai.confidence);
+
+   if(ok)
+   {
+      g_trades_today++;
+      if(IsMetals()) g_trades_today_metals++; else g_trades_today_fx++;
+      g_last_ai_executed_id = ai.id;
+      g_last_score = aiScore.total;
+      LogTradeCSV(buy ? "BUY" : "SELL", lot, entry, sl, tp, aiScore);
+      LogDecisionCSV(buy ? "BUY" : "SELL", aiScore, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
+      TelegramSend(StringFormat("Mad Rabbit AI %s %s | Conf %.1f | SL %.5f TP %.5f", _Symbol, buy ? "BUY" : "SELL", ai.confidence, sl, tp));
+   }
+   else
+   {
+      g_last_lock_reason = "ORDER_FAIL";
+      LogDecisionCSV("SKIP", aiScore, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
+   }
+   return true;
+}
+
 void Evaluate()
 {
    UpdateDailyCounters();
@@ -660,7 +1381,7 @@ void Evaluate()
 
 
    UpdateSRCache();
-   if(!IsNewBar(PERIOD_H1)) return;
+   if(!IsNewBar(Analysis_Timeframe)) return;
 
    if(!IsTradeAllowed())
    {
@@ -726,12 +1447,36 @@ void Evaluate()
 
    ScoreBreakdown score_buy = buy_setup ? GetSetupScore(true, rsi_buff[1], macd_main[1], macd_signal[1], atr_pips, dist_support, buy_rej) : EmptyScore();
    ScoreBreakdown score_sell = sell_setup ? GetSetupScore(false, rsi_buff[1], macd_main[1], macd_signal[1], atr_pips, dist_resist, sell_rej) : EmptyScore();
+   double buy_effective = score_buy.total;
+   double sell_effective = score_sell.total;
 
-   g_last_score = MathMax(score_buy.total, score_sell.total);
+   if(Enable_AI_Signals && Enable_AI_Advisory && AI_API_Key != "")
+   {
+      if(g_ai_advisory_ready && (g_ai_advisory_expires == 0 || TimeCurrent() <= g_ai_advisory_expires))
+      {
+         double w = ClampDouble(AI_Advisory_Weight, 0.0, 1.0);
+         if(g_ai_advisory_signal == "BUY")
+         {
+            buy_effective = (1.0 - w) * buy_effective + w * g_ai_advisory_confidence;
+            sell_effective = MathMax(0.0, sell_effective - AI_Advisory_Opposite_Penalty);
+         }
+         else if(g_ai_advisory_signal == "SELL")
+         {
+            sell_effective = (1.0 - w) * sell_effective + w * g_ai_advisory_confidence;
+            buy_effective = MathMax(0.0, buy_effective - AI_Advisory_Opposite_Penalty);
+         }
+      }
+      else if(g_ai_advisory_ready && g_ai_advisory_expires > 0 && TimeCurrent() > g_ai_advisory_expires)
+      {
+         g_ai_advisory_ready = false;
+      }
+   }
 
-   int threshold = IsMetals() ? Confidence_Threshold_Metals : Confidence_Threshold_FX;
-   bool buy = (score_buy.total >= threshold && score_buy.total >= score_sell.total);
-   bool sell = (score_sell.total >= threshold && score_sell.total > score_buy.total);
+   g_last_score = (int)MathRound(MathMax(buy_effective, sell_effective));
+   int baseThreshold = IsMetals() ? Confidence_Threshold_Metals : Confidence_Threshold_FX;
+   int threshold = DynamicScoreThreshold(baseThreshold);
+   bool buy = (buy_effective >= threshold && buy_effective >= sell_effective);
+   bool sell = (sell_effective >= threshold && sell_effective > buy_effective);
 
    if(buy && PositionsDirectionCount(_Symbol, POSITION_TYPE_BUY) > 0) { g_last_lock_reason = "STACK"; LogDecisionCSV("SKIP", score_buy, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
    if(sell && PositionsDirectionCount(_Symbol, POSITION_TYPE_SELL) > 0) { g_last_lock_reason = "STACK"; LogDecisionCSV("SKIP", score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
@@ -763,6 +1508,7 @@ void Evaluate()
 
    if(Reduce_Asian_Risk && IsAsianSession())
       risk_pct *= Asian_Risk_Multiplier;
+   risk_pct *= RiskThrottleMultiplier();
 
    double entry = buy ? ask : bid;
    double lot = CalculateLotByRisk(entry, sl, risk_pct);
@@ -808,7 +1554,9 @@ void UpdateDashboard()
       "Session: ", (IsInSession() ? "ON" : "OFF"), "\n",
       "Risk Mode: ", risk_mode, "\n",
       "Regime: ", g_last_regime, "\n",
+      "Adaptive ATR: ", DoubleToString(g_dynamic_atr_min, 1), "-", DoubleToString(g_dynamic_atr_max, 1), " | SpreadMax: ", DoubleToString(g_dynamic_spread_max, 1), "\n",
       "Last Score: ", g_last_score, "\n",
+      "AI: ", (Enable_AI_Signals ? g_last_ai_status : "OFF"), " | Sig: ", g_last_ai_signal, " (", DoubleToString(g_last_ai_confidence, 1), ")\n",
       "Lock: ", g_last_lock_reason
    );
 }
@@ -816,10 +1564,10 @@ void UpdateDashboard()
 // ---- MT5 Events ----
 int OnInit()
 {
-   rsi_handle = iRSI(_Symbol, PERIOD_H1, RSI_Period, PRICE_CLOSE);
-   macd_handle = iMACD(_Symbol, PERIOD_H1, MACD_Fast, MACD_Slow, MACD_Signal, PRICE_CLOSE);
-   atr_handle = iATR(_Symbol, PERIOD_H1, ATR_Period);
-   ema_handle = iMA(_Symbol, PERIOD_H1, EMA_Slope_Period, 0, MODE_EMA, PRICE_CLOSE);
+   rsi_handle = iRSI(_Symbol, Analysis_Timeframe, RSI_Period, PRICE_CLOSE);
+   macd_handle = iMACD(_Symbol, Analysis_Timeframe, MACD_Fast, MACD_Slow, MACD_Signal, PRICE_CLOSE);
+   atr_handle = iATR(_Symbol, Analysis_Timeframe, ATR_Period);
+   ema_handle = iMA(_Symbol, Analysis_Timeframe, EMA_Slope_Period, 0, MODE_EMA, PRICE_CLOSE);
 
    if(rsi_handle == INVALID_HANDLE || macd_handle == INVALID_HANDLE || atr_handle == INVALID_HANDLE || ema_handle == INVALID_HANDLE)
       return(INIT_FAILED);
@@ -830,6 +1578,7 @@ int OnInit()
    if(Telegram_Test_OnInit && Telegram_Enable)
       TelegramSend("Mad Rabbit EA started on " + _Symbol);
 
+   RefreshAdaptiveLimits();
    EventSetTimer(Scan_Interval_Seconds);
    return(INIT_SUCCEEDED);
 }
@@ -845,8 +1594,18 @@ void OnDeinit(const int reason)
 
 void OnTimer()
 {
+   RefreshAdaptiveLimits();
+   RefreshAIAdvisoryCache();
    ManageOpenPositions();
-   Evaluate();
+   if(Enable_AI_Signals)
+   {
+      if(AI_Use_Only_Mode) EvaluateAI();
+      else Evaluate();
+   }
+   else
+   {
+      Evaluate();
+   }
    UpdateDashboard();
 }
 

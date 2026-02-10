@@ -295,6 +295,16 @@ string EscapeJson(const string text)
    return out;
 }
 
+string CompactForLog(const string text, const int maxLen)
+{
+   string out = text;
+   StringReplace(out, "\r", " ");
+   StringReplace(out, "\n", " ");
+   out = TrimCopy(out);
+   if(maxLen > 0 && StringLen(out) > maxLen) out = StringSubstr(out, 0, maxLen);
+   return out;
+}
+
 bool JsonGetStringValue(const string json, const string key, string &value)
 {
    string pattern = "\"" + key + "\"";
@@ -593,6 +603,7 @@ bool IsOpenAIEndpoint(const string endpoint)
 bool PollAISignal(AISignal &sig, double atr_pips, double ema_slope_pips)
 {
    sig = EmptyAISignal();
+   g_last_ai_reason = "";
    if(!Enable_AI_Signals)
    {
       g_last_ai_status = "DISABLED";
@@ -671,25 +682,33 @@ bool PollAISignal(AISignal &sig, double atr_pips, double ema_slope_pips)
 
    char post[];
    char result[];
-   StringToCharArray(payload, post, 0, WHOLE_ARRAY, CP_UTF8);
+   int payloadBytes = StringToCharArray(payload, post, 0, WHOLE_ARRAY, CP_UTF8);
+   if(payloadBytes <= 1)
+   {
+      g_last_ai_status = "PAYLOAD_ENCODE_FAIL";
+      return false;
+   }
+   ArrayResize(post, payloadBytes - 1); // drop terminating \0
    string response_headers = "";
    ResetLastError();
    int code = WebRequest("POST", endpoint, headers, AI_HTTP_Timeout_Ms, post, result, response_headers);
    if(code == -1)
    {
       g_last_ai_status = "HTTP_ERR_" + IntegerToString(GetLastError());
+      g_last_ai_reason = "WEBREQUEST_FAIL";
       return false;
    }
+   string body = CharArrayToString(result, 0, -1, CP_UTF8);
    if(code < 200 || code >= 300)
    {
       g_last_ai_status = "HTTP_" + IntegerToString(code);
+      g_last_ai_reason = CompactForLog(body, 220);
       return false;
    }
-
-   string body = CharArrayToString(result, 0, -1, CP_UTF8);
    if(body == "")
    {
       g_last_ai_status = "EMPTY_BODY";
+      g_last_ai_reason = "EMPTY_RESPONSE";
       return false;
    }
 
@@ -699,6 +718,7 @@ bool PollAISignal(AISignal &sig, double atr_pips, double ema_slope_pips)
       if(!JsonGetStringValue(body, "content", content))
       {
          g_last_ai_status = "PARSE_CONTENT_FAIL";
+         g_last_ai_reason = CompactForLog(body, 220);
          return false;
       }
       return ParseAISignalFromJson(content, now, sig);
@@ -1028,11 +1048,15 @@ void EnsureLogHeader(const string file, const string header)
 void LogDecisionCSV(const string action, const ScoreBreakdown &s, double spread_pips, double atr_pips, double ema_slope)
 {
    EnsureLogHeader(LOG_DECISIONS, "time,symbol,regime,score,total_rsi,macd,sr,candle,atr,spread,ema_slope,lock_reason,action,ai_id,ai_signal,ai_confidence,ai_status,ai_reason");
+   string aiReasonCsv = g_last_ai_reason;
+   StringReplace(aiReasonCsv, ",", ";");
+   StringReplace(aiReasonCsv, "\r", " ");
+   StringReplace(aiReasonCsv, "\n", " ");
    string line = StringFormat("%s,%s,%s,%d,%d,%d,%d,%d,%d,%.2f,%.2f,%s,%s,%s,%s,%.2f,%s,%s",
       TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), _Symbol, g_last_regime,
       s.total, s.rsi, s.macd, s.sr, s.candle, s.atr,
       spread_pips, ema_slope, g_last_lock_reason, action,
-      g_last_ai_signal_id, g_last_ai_signal, g_last_ai_confidence, g_last_ai_status, g_last_ai_reason);
+      g_last_ai_signal_id, g_last_ai_signal, g_last_ai_confidence, g_last_ai_status, aiReasonCsv);
    LogLine(LOG_DECISIONS, line);
 }
 

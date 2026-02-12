@@ -18,17 +18,9 @@ class PositionMeta:
 
 
 class TradeSupervisor:
-    def __init__(
-        self,
-        adapter: BrokerAdapter,
-        risk: HardRiskManager,
-        close_on_good_profit: bool = True,
-        good_profit_rr: float = 1.0,
-    ) -> None:
+    def __init__(self, adapter: BrokerAdapter, risk: HardRiskManager) -> None:
         self.adapter = adapter
         self.risk = risk
-        self.close_on_good_profit = close_on_good_profit
-        self.good_profit_rr = good_profit_rr
         self.meta: Dict[str, PositionMeta] = {}
 
     def register(self, position_id: str, meta: PositionMeta) -> None:
@@ -48,13 +40,6 @@ class TradeSupervisor:
             pnl = (current_price - pos.entry_price) if pos.side.value == "BUY" else (pos.entry_price - current_price)
 
             if meta:
-                risk_distance = abs(pos.entry_price - pos.stop_loss)
-                if self.close_on_good_profit and risk_distance > 0:
-                    rr_now = pnl / risk_distance
-                    if rr_now >= self.good_profit_rr:
-                        self.adapter.close_position(pos.broker_position_id)
-                        continue
-
                 if state.time - meta.entry_time > timedelta(minutes=meta.max_hold_minutes):
                     self.adapter.close_position(pos.broker_position_id)
                     continue

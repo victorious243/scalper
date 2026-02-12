@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                               Mad_Rabbit_Bot.mq4 |
+//|                                               Scalper_Bot.mq4    |
 //|             Disciplined, risk-first MT4 EA (H1 confluence)       |
 //+------------------------------------------------------------------+
 #property copyright ""
@@ -11,8 +11,8 @@ input double Risk_Per_Trade_Pct      = 0.5;    // % equity per trade
 input double Daily_Profit_Cap_Pct    = 1.0;    // stop trading if reached
 input double Daily_Loss_Limit_Pct    = 1.0;    // stop trading if reached
 input double Max_Drawdown_Pct        = 15.0;   // hard kill-switch
-input int    Max_Trades_Per_Day      = 20;
-input int    Max_Concurrent_Trades   = 6;
+input int    Max_Trades_Per_Day      = 12;
+input int    Max_Concurrent_Trades   = 2;
 input int    Scan_Interval_Seconds   = 10;
 
 input int    RSI_Period              = 14;
@@ -25,15 +25,15 @@ input int    EMA_Slope_Period        = 50;
 input int    EMA_Slope_Lookback      = 5;
 input double EMA_Slope_Threshold     = 5.0;   // pips over lookback
 
-input double Min_SL_Pips             = 30.0;
-input double Max_SL_Pips             = 40.0;
-input double Min_TP_Pips             = 60.0;
-input double Max_TP_Pips             = 80.0;
-input double Min_RR                  = 2.0;
+input double Min_SL_Pips             = 10.0;
+input double Max_SL_Pips             = 25.0;
+input double Min_TP_Pips             = 12.0;
+input double Max_TP_Pips             = 35.0;
+input double Min_RR                  = 1.2;
 
 input double Max_Spread_Pips_Metals  = 20.0;
 input double Max_Spread_Pips_FX      = 2.0;
-input double ATR_Min_Pips            = 10.0;
+input double ATR_Min_Pips            = 4.0;
 input double ATR_Max_Pips            = 200.0;
 input int    ATR_Regime_Period       = 20;
 
@@ -47,8 +47,13 @@ input int    NY_End_Hour             = 16;
 input bool   Reduce_Asian_Risk        = true;
 input double Asian_Risk_Multiplier    = 0.5;
 
-input int    Confidence_Threshold_Metals = 75;
-input int    Confidence_Threshold_FX     = 70;
+input int    Confidence_Threshold_Metals = 64;
+input int    Confidence_Threshold_FX     = 60;
+input double Entry_RSI_Buy_Max           = 48.0;
+input double Entry_RSI_Sell_Min          = 52.0;
+input double Entry_SR_Max_Distance_Pips  = 30.0;
+input bool   Entry_Require_MACD_Align    = true;
+input bool   Entry_Require_Trend_Direction = true;
 
 // Allocation multipliers (per symbol)
 input double Risk_Multiplier_XAU      = 1.0;  // 50% portfolio focus
@@ -67,7 +72,7 @@ input string Allowed_Symbols          = "XAUUSD,EURUSD,GBPUSD,USDJPY";
 
 // Very selective mode
 enum TradeMode { CONSERVATIVE=0, BALANCED=1, ACTIVE=2 };
-input TradeMode Mode = CONSERVATIVE;
+input TradeMode Mode = BALANCED;
 
 // Telegram notifications
 input bool   Telegram_Enable          = false;
@@ -86,6 +91,11 @@ input double Partial_Close_Percent     = 50.0;  // % volume to close
 input bool   Enable_Trailing           = true;
 input double Trail_Start_RR            = 1.5;   // start trailing at >= this RR
 input double Trail_Step_Pips           = 10.0;  // trail step (pips)
+input bool   Enable_Quick_Profit_Exit  = true;  // do not let good trades roundtrip
+input double Quick_Profit_Close_RR     = 1.0;
+input bool   Quick_Profit_Require_Rejection = true;
+input bool   Enable_Time_Exit          = true;  // scalper timeout
+input int    Max_Hold_Minutes          = 180;
 
 // Support/Resistance caching (H1)
 input int    SR_Lookback_Bars          = 200;
@@ -117,9 +127,9 @@ string g_last_lock_reason = "";
 datetime g_last_telegram_time = 0;
 
 // Logging
-string LOG_DECISIONS = "MadRabbit_Decisions.csv";
-string LOG_TRADES = "MadRabbit_Trades.csv";
-string LOG_EVAL = "MadRabbit_Log.csv";
+string LOG_DECISIONS = "Scalper_Decisions.csv";
+string LOG_TRADES = "Scalper_Trades.csv";
+string LOG_EVAL = "Scalper_Log.csv";
 
 // S/R cache (per-chart symbol)
 struct SRZone { double price; double half_width; bool is_resistance; datetime t; };
@@ -345,13 +355,13 @@ ScoreBreakdown GetSetupScore(bool buy, double rsi, double macd_main, double macd
    ScoreBreakdown s;
    s.rsi = 0; s.macd = 0; s.sr = 0; s.candle = 0; s.atr = 0; s.total = 0;
 
-   if(buy && rsi < 35) s.rsi = 20;
-   if(!buy && rsi > 65) s.rsi = 20;
+   if(buy && rsi <= Entry_RSI_Buy_Max) s.rsi = 20;
+   if(!buy && rsi >= Entry_RSI_Sell_Min) s.rsi = 20;
 
    if((buy && macd_main > macd_signal) || (!buy && macd_main < macd_signal)) s.macd = 20;
 
-   if(dist_sr_pips <= 10.0) s.sr = 20;
-   else if(dist_sr_pips <= 20.0) s.sr = 10;
+   if(dist_sr_pips <= (Entry_SR_Max_Distance_Pips * 0.5)) s.sr = 20;
+   else if(dist_sr_pips <= Entry_SR_Max_Distance_Pips) s.sr = 10;
 
    if(rejection) s.candle = 20;
 
@@ -374,14 +384,14 @@ bool IsTradeAllowed()
 
    if(IsMetals())
    {
-      if(g_trades_today_metals >= 3) { g_last_lock_reason = "METALS_LIMIT"; return false; }
+      if(g_trades_today_metals >= 6) { g_last_lock_reason = "METALS_LIMIT"; return false; }
    }
    else
    {
-      if(g_trades_today_fx >= 2) { g_last_lock_reason = "FX_LIMIT"; return false; }
+      if(g_trades_today_fx >= 5) { g_last_lock_reason = "FX_LIMIT"; return false; }
    }
    if(g_trades_today >= Max_Trades_Per_Day) { g_last_lock_reason = "DAILY_LIMIT"; return false; }
-   if(g_last_loss_time > 0 && (TimeCurrent() - g_last_loss_time) < 1800) { g_last_lock_reason = "LOSS_COOLDOWN"; return false; }
+   if(g_last_loss_time > 0 && (TimeCurrent() - g_last_loss_time) < 900) { g_last_lock_reason = "LOSS_COOLDOWN"; return false; }
 
    return true;
 }
@@ -536,11 +546,30 @@ void ManageOpenPositions()
       double bid = MarketInfo(_Symbol, MODE_BID);
       double ask = MarketInfo(_Symbol, MODE_ASK);
       double price = (type==OP_BUY) ? bid : ask;
+      datetime opened_at = OrderOpenTime();
 
       double risk_dist = MathAbs(entry - sl);
       if(risk_dist <= 0) continue;
 
       double rr = (type==OP_BUY) ? (price-entry)/risk_dist : (entry-price)/risk_dist;
+
+      if(Enable_Time_Exit && Max_Hold_Minutes > 0 && (TimeCurrent() - opened_at) >= (Max_Hold_Minutes * 60))
+      {
+         OrderClose(OrderTicket(), vol, price, 10, clrNONE);
+         continue;
+      }
+
+      if(Enable_Quick_Profit_Exit && rr >= Quick_Profit_Close_RR)
+      {
+         bool close_now = true;
+         if(Quick_Profit_Require_Rejection)
+            close_now = (type == OP_BUY) ? RejectionCandle(false) : RejectionCandle(true);
+         if(close_now)
+         {
+            OrderClose(OrderTicket(), vol, price, 10, clrNONE);
+            continue;
+         }
+      }
 
       // Partial close
       if(Enable_Partial_Close && rr >= Partial_Close_RR)
@@ -670,8 +699,18 @@ void Evaluate()
 
    double dist_support = NearestSRDistancePips(true, bid);
    double dist_resist  = NearestSRDistancePips(false, ask);
-   bool buy_setup = (rsi < 40 && dist_support <= 20);
-   bool sell_setup = (rsi > 60 && dist_resist <= 20);
+   bool buy_setup = (rsi <= Entry_RSI_Buy_Max && dist_support <= Entry_SR_Max_Distance_Pips);
+   bool sell_setup = (rsi >= Entry_RSI_Sell_Min && dist_resist <= Entry_SR_Max_Distance_Pips);
+   if(Entry_Require_MACD_Align)
+   {
+      buy_setup = buy_setup && (macd_main > macd_signal);
+      sell_setup = sell_setup && (macd_main < macd_signal);
+   }
+   if(Entry_Require_Trend_Direction && g_last_regime == "TREND")
+   {
+      if(ema_slope_pips > 0.0) sell_setup = false;
+      if(ema_slope_pips < 0.0) buy_setup = false;
+   }
    if(!buy_setup && !sell_setup) { g_last_lock_reason = "NO_SETUP"; LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
 
    bool buy_rej = RejectionCandle(true);
@@ -694,14 +733,14 @@ void Evaluate()
    // Selective caps
    if(IsMetals())
    {
-      if(g_trades_today_metals >= 3) { g_last_lock_reason = "METALS_LIMIT"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
+      if(g_trades_today_metals >= 6) { g_last_lock_reason = "METALS_LIMIT"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
    }
    else
    {
-      if(g_trades_today_fx >= 2) { g_last_lock_reason = "FX_LIMIT"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
+      if(g_trades_today_fx >= 5) { g_last_lock_reason = "FX_LIMIT"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
    }
    if(g_trades_today >= Max_Trades_Per_Day) { g_last_lock_reason = "DAILY_LIMIT"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
-   if(g_last_loss_time > 0 && (TimeCurrent() - g_last_loss_time) < 1800) { g_last_lock_reason = "LOSS_COOLDOWN"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
+   if(g_last_loss_time > 0 && (TimeCurrent() - g_last_loss_time) < 900) { g_last_lock_reason = "LOSS_COOLDOWN"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
 
    double sl_pips = MathMax(Min_SL_Pips, MathMin(Max_SL_Pips, atr_pips * 1.2));
    double tp_pips = MathMax(Min_TP_Pips, MathMin(Max_TP_Pips, sl_pips * Min_RR));
@@ -723,8 +762,8 @@ void Evaluate()
 
    int ticket = -1;
    int slip = 10;
-   if(buy) ticket = OrderSend(_Symbol, OP_BUY, lot, ask, slip, sl, tp, "MadRabbit", Magic_Number, 0, clrBlue);
-   if(sell) ticket = OrderSend(_Symbol, OP_SELL, lot, bid, slip, sl, tp, "MadRabbit", Magic_Number, 0, clrRed);
+   if(buy) ticket = OrderSend(_Symbol, OP_BUY, lot, ask, slip, sl, tp, "Scalper", Magic_Number, 0, clrBlue);
+   if(sell) ticket = OrderSend(_Symbol, OP_SELL, lot, bid, slip, sl, tp, "Scalper", Magic_Number, 0, clrRed);
 
    if(ticket > 0)
    {
@@ -732,7 +771,7 @@ void Evaluate()
       if(IsMetals()) g_trades_today_metals++; else g_trades_today_fx++;
       LogTradeCSV(buy ? "BUY" : "SELL", lot, entry, sl, tp, buy ? score_buy : score_sell);
       LogDecisionCSV(buy ? "BUY" : "SELL", buy ? score_buy : score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
-      TelegramSend(StringFormat("Mad Rabbit %s %s | Score %d | SL %.5f TP %.5f", _Symbol, buy ? "BUY" : "SELL", g_last_score, sl, tp));
+      TelegramSend(StringFormat("Scalper %s %s | Score %d | SL %.5f TP %.5f", _Symbol, buy ? "BUY" : "SELL", g_last_score, sl, tp));
    }
    else
    {
@@ -752,7 +791,7 @@ void UpdateDashboard()
    else if(IsAsianSession() && Reduce_Asian_Risk) risk_mode = "Reduced";
 
    Comment(
-      "Mad Rabbit | ", _Symbol, "\n",
+      "Scalper | ", _Symbol, "\n",
       "Daily PnL: ", DoubleToString(pnl_pct, 2), "%\n",
       "Drawdown: ", DoubleToString(dd_pct, 2), "%\n",
       "Active Trades: ", OrdersTotal(), "\n",
@@ -772,7 +811,7 @@ int OnInit()
    g_last_history_total = OrdersHistoryTotal();
 
    if(Telegram_Test_OnInit && Telegram_Enable)
-      TelegramSend("Mad Rabbit EA started on " + _Symbol);
+      TelegramSend("Scalper EA started on " + _Symbol);
 
    EventSetTimer(Scan_Interval_Seconds);
    return(INIT_SUCCEEDED);

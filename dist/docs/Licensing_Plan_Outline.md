@@ -1,4 +1,4 @@
-# Mad Rabbit EA — Licensing Plan Outline (Draft)
+# Scalper EA — Licensing Plan Outline (Draft)
 
 ## 1) License Types
 - **Personal License**: Single MT5 account, non‑transferable.

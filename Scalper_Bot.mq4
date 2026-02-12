@@ -11,8 +11,8 @@ input double Risk_Per_Trade_Pct      = 0.5;    // % equity per trade
 input double Daily_Profit_Cap_Pct    = 1.0;    // stop trading if reached
 input double Daily_Loss_Limit_Pct    = 1.0;    // stop trading if reached
 input double Max_Drawdown_Pct        = 15.0;   // hard kill-switch
-input int    Max_Trades_Per_Day      = 12;
-input int    Max_Concurrent_Trades   = 2;
+input int    Max_Trades_Per_Day      = 20;
+input int    Max_Concurrent_Trades   = 3;
 input int    Scan_Interval_Seconds   = 10;
 
 input int    RSI_Period              = 14;
@@ -32,8 +32,8 @@ input double Max_TP_Pips             = 35.0;
 input double Min_RR                  = 1.2;
 
 input double Max_Spread_Pips_Metals  = 20.0;
-input double Max_Spread_Pips_FX      = 2.0;
-input double ATR_Min_Pips            = 4.0;
+input double Max_Spread_Pips_FX      = 2.6;
+input double ATR_Min_Pips            = 3.0;
 input double ATR_Max_Pips            = 200.0;
 input int    ATR_Regime_Period       = 20;
 
@@ -47,13 +47,13 @@ input int    NY_End_Hour             = 16;
 input bool   Reduce_Asian_Risk        = true;
 input double Asian_Risk_Multiplier    = 0.5;
 
-input int    Confidence_Threshold_Metals = 64;
-input int    Confidence_Threshold_FX     = 60;
+input int    Confidence_Threshold_Metals = 56;
+input int    Confidence_Threshold_FX     = 52;
 input double Entry_RSI_Buy_Max           = 48.0;
 input double Entry_RSI_Sell_Min          = 52.0;
 input double Entry_SR_Max_Distance_Pips  = 30.0;
-input bool   Entry_Require_MACD_Align    = true;
-input bool   Entry_Require_Trend_Direction = true;
+input bool   Entry_Require_MACD_Align    = false;
+input bool   Entry_Require_Trend_Direction = false;
 
 // Allocation multipliers (per symbol)
 input double Risk_Multiplier_XAU      = 1.0;  // 50% portfolio focus
@@ -92,10 +92,10 @@ input bool   Enable_Trailing           = true;
 input double Trail_Start_RR            = 1.5;   // start trailing at >= this RR
 input double Trail_Step_Pips           = 10.0;  // trail step (pips)
 input bool   Enable_Quick_Profit_Exit  = true;  // do not let good trades roundtrip
-input double Quick_Profit_Close_RR     = 1.0;
-input bool   Quick_Profit_Require_Rejection = true;
+input double Quick_Profit_Close_RR     = 0.8;
+input bool   Quick_Profit_Require_Rejection = false;
 input bool   Enable_Time_Exit          = true;  // scalper timeout
-input int    Max_Hold_Minutes          = 180;
+input int    Max_Hold_Minutes          = 120;
 
 // Support/Resistance caching (H1)
 input int    SR_Lookback_Bars          = 200;
@@ -330,7 +330,7 @@ bool IsTrendRegime(double ema_slope_pips)
 
 bool IsLowVolRegime(double atr_pips, double atr_sma_pips)
 {
-   return atr_pips < atr_sma_pips * 0.7;
+   return atr_pips < atr_sma_pips * 0.55;
 }
 
 struct ScoreBreakdown
@@ -384,14 +384,14 @@ bool IsTradeAllowed()
 
    if(IsMetals())
    {
-      if(g_trades_today_metals >= 6) { g_last_lock_reason = "METALS_LIMIT"; return false; }
+      if(g_trades_today_metals >= 10) { g_last_lock_reason = "METALS_LIMIT"; return false; }
    }
    else
    {
-      if(g_trades_today_fx >= 5) { g_last_lock_reason = "FX_LIMIT"; return false; }
+      if(g_trades_today_fx >= 10) { g_last_lock_reason = "FX_LIMIT"; return false; }
    }
    if(g_trades_today >= Max_Trades_Per_Day) { g_last_lock_reason = "DAILY_LIMIT"; return false; }
-   if(g_last_loss_time > 0 && (TimeCurrent() - g_last_loss_time) < 900) { g_last_lock_reason = "LOSS_COOLDOWN"; return false; }
+   if(g_last_loss_time > 0 && (TimeCurrent() - g_last_loss_time) < 300) { g_last_lock_reason = "LOSS_COOLDOWN"; return false; }
 
    return true;
 }
@@ -722,6 +722,9 @@ void Evaluate()
    g_last_score = MathMax(score_buy.total, score_sell.total);
 
    int threshold = IsMetals() ? Confidence_Threshold_Metals : Confidence_Threshold_FX;
+   if(Mode == BALANCED) threshold -= 4;
+   if(Mode == ACTIVE) threshold -= 8;
+   if(threshold < 35) threshold = 35;
    bool buy = (score_buy.total >= threshold && score_buy.total >= score_sell.total);
    bool sell = (score_sell.total >= threshold && score_sell.total > score_buy.total);
 
@@ -733,14 +736,14 @@ void Evaluate()
    // Selective caps
    if(IsMetals())
    {
-      if(g_trades_today_metals >= 6) { g_last_lock_reason = "METALS_LIMIT"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
+      if(g_trades_today_metals >= 10) { g_last_lock_reason = "METALS_LIMIT"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
    }
    else
    {
-      if(g_trades_today_fx >= 5) { g_last_lock_reason = "FX_LIMIT"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
+      if(g_trades_today_fx >= 10) { g_last_lock_reason = "FX_LIMIT"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
    }
    if(g_trades_today >= Max_Trades_Per_Day) { g_last_lock_reason = "DAILY_LIMIT"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
-   if(g_last_loss_time > 0 && (TimeCurrent() - g_last_loss_time) < 900) { g_last_lock_reason = "LOSS_COOLDOWN"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
+   if(g_last_loss_time > 0 && (TimeCurrent() - g_last_loss_time) < 300) { g_last_lock_reason = "LOSS_COOLDOWN"; LogDecisionCSV("SKIP", score_buy.total>score_sell.total?score_buy:score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
 
    double sl_pips = MathMax(Min_SL_Pips, MathMin(Max_SL_Pips, atr_pips * 1.2));
    double tp_pips = MathMax(Min_TP_Pips, MathMin(Max_TP_Pips, sl_pips * Min_RR));

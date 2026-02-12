@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                               Mad_Rabbit_Bot.mq4 |
+//|                                               Scalper_Bot.mq4 |
 //|             Disciplined, risk-first MT4 EA (H1 confluence)       |
 //+------------------------------------------------------------------+
 #property copyright ""
@@ -49,6 +49,10 @@ input double Asian_Risk_Multiplier    = 0.5;
 
 input int    Confidence_Threshold_Metals = 75;
 input int    Confidence_Threshold_FX     = 70;
+input double Entry_RSI_Buy_Max           = 45.0;
+input double Entry_RSI_Sell_Min          = 55.0;
+input double Entry_SR_Max_Distance_Pips  = 25.0;
+input bool   Entry_Require_MACD_Align    = true;
 
 // Allocation multipliers (per symbol)
 input double Risk_Multiplier_XAU      = 1.0;  // 50% portfolio focus
@@ -86,6 +90,9 @@ input double Partial_Close_Percent     = 50.0;  // % volume to close
 input bool   Enable_Trailing           = true;
 input double Trail_Start_RR            = 1.5;   // start trailing at >= this RR
 input double Trail_Step_Pips           = 10.0;  // trail step (pips)
+input bool   Enable_Quick_Profit_Exit  = true;
+input double Quick_Profit_Close_RR     = 1.1;
+input bool   Quick_Profit_Require_Rejection = true;
 
 // Support/Resistance caching (H1)
 input int    SR_Lookback_Bars          = 200;
@@ -117,9 +124,9 @@ string g_last_lock_reason = "";
 datetime g_last_telegram_time = 0;
 
 // Logging
-string LOG_DECISIONS = "MadRabbit_Decisions.csv";
-string LOG_TRADES = "MadRabbit_Trades.csv";
-string LOG_EVAL = "MadRabbit_Log.csv";
+string LOG_DECISIONS = "Scalper_Decisions.csv";
+string LOG_TRADES = "Scalper_Trades.csv";
+string LOG_EVAL = "Scalper_Log.csv";
 
 // S/R cache (per-chart symbol)
 struct SRZone { double price; double half_width; bool is_resistance; datetime t; };
@@ -542,6 +549,19 @@ void ManageOpenPositions()
 
       double rr = (type==OP_BUY) ? (price-entry)/risk_dist : (entry-price)/risk_dist;
 
+      // Close winners early when profit target quality is met.
+      if(Enable_Quick_Profit_Exit && rr >= Quick_Profit_Close_RR)
+      {
+         bool close_now = true;
+         if(Quick_Profit_Require_Rejection)
+            close_now = (type == OP_BUY) ? RejectionCandle(false) : RejectionCandle(true);
+         if(close_now)
+         {
+            OrderClose(OrderTicket(), vol, price, 10, clrNONE);
+            continue;
+         }
+      }
+
       // Partial close
       if(Enable_Partial_Close && rr >= Partial_Close_RR)
       {
@@ -670,8 +690,18 @@ void Evaluate()
 
    double dist_support = NearestSRDistancePips(true, bid);
    double dist_resist  = NearestSRDistancePips(false, ask);
-   bool buy_setup = (rsi < 40 && dist_support <= 20);
-   bool sell_setup = (rsi > 60 && dist_resist <= 20);
+   bool buy_setup = (rsi <= Entry_RSI_Buy_Max && dist_support <= Entry_SR_Max_Distance_Pips);
+   bool sell_setup = (rsi >= Entry_RSI_Sell_Min && dist_resist <= Entry_SR_Max_Distance_Pips);
+   if(Entry_Require_MACD_Align)
+   {
+      buy_setup = buy_setup && (macd_main > macd_signal);
+      sell_setup = sell_setup && (macd_main < macd_signal);
+   }
+   if(g_last_regime == "TREND")
+   {
+      if(ema_slope_pips > 0.0) sell_setup = false;
+      if(ema_slope_pips < 0.0) buy_setup = false;
+   }
    if(!buy_setup && !sell_setup) { g_last_lock_reason = "NO_SETUP"; LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
 
    bool buy_rej = RejectionCandle(true);
@@ -723,8 +753,8 @@ void Evaluate()
 
    int ticket = -1;
    int slip = 10;
-   if(buy) ticket = OrderSend(_Symbol, OP_BUY, lot, ask, slip, sl, tp, "MadRabbit", Magic_Number, 0, clrBlue);
-   if(sell) ticket = OrderSend(_Symbol, OP_SELL, lot, bid, slip, sl, tp, "MadRabbit", Magic_Number, 0, clrRed);
+   if(buy) ticket = OrderSend(_Symbol, OP_BUY, lot, ask, slip, sl, tp, "Scalper", Magic_Number, 0, clrBlue);
+   if(sell) ticket = OrderSend(_Symbol, OP_SELL, lot, bid, slip, sl, tp, "Scalper", Magic_Number, 0, clrRed);
 
    if(ticket > 0)
    {
@@ -732,7 +762,7 @@ void Evaluate()
       if(IsMetals()) g_trades_today_metals++; else g_trades_today_fx++;
       LogTradeCSV(buy ? "BUY" : "SELL", lot, entry, sl, tp, buy ? score_buy : score_sell);
       LogDecisionCSV(buy ? "BUY" : "SELL", buy ? score_buy : score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
-      TelegramSend(StringFormat("Mad Rabbit %s %s | Score %d | SL %.5f TP %.5f", _Symbol, buy ? "BUY" : "SELL", g_last_score, sl, tp));
+      TelegramSend(StringFormat("Scalper %s %s | Score %d | SL %.5f TP %.5f", _Symbol, buy ? "BUY" : "SELL", g_last_score, sl, tp));
    }
    else
    {
@@ -752,7 +782,7 @@ void UpdateDashboard()
    else if(IsAsianSession() && Reduce_Asian_Risk) risk_mode = "Reduced";
 
    Comment(
-      "Mad Rabbit | ", _Symbol, "\n",
+      "Scalper | ", _Symbol, "\n",
       "Daily PnL: ", DoubleToString(pnl_pct, 2), "%\n",
       "Drawdown: ", DoubleToString(dd_pct, 2), "%\n",
       "Active Trades: ", OrdersTotal(), "\n",
@@ -772,7 +802,7 @@ int OnInit()
    g_last_history_total = OrdersHistoryTotal();
 
    if(Telegram_Test_OnInit && Telegram_Enable)
-      TelegramSend("Mad Rabbit EA started on " + _Symbol);
+      TelegramSend("Scalper EA started on " + _Symbol);
 
    EventSetTimer(Scan_Interval_Seconds);
    return(INIT_SUCCEEDED);

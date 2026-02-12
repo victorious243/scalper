@@ -1,4 +1,4 @@
-# Mad Rabbit EA — QuickStart (Draft)
+# Scalper EA — QuickStart (Draft)
 
 ## 1) What You Need
 - MetaTrader 5 (desktop)
@@ -9,7 +9,7 @@
 1. Open MT5.
 2. Go to **File → Open Data Folder**.
 3. Open **MQL5 → Experts**.
-4. Copy `Mad_Rabbit_Bot.ex5` into **Experts**.
+4. Copy `Scalper_Bot.ex5` into **Experts**.
 5. Restart MT5 (or refresh the Navigator).
 
 ## 3) Enable Algo Trading
@@ -19,7 +19,7 @@
 ## 4) Attach EA to Chart
 1. Open a chart for your symbol (e.g., XAUUSD).
 2. Set timeframe to **H1**.
-3. Drag **Mad_Rabbit_Bot** onto the chart.
+3. Drag **Scalper_Bot** onto the chart.
 4. Load the matching preset file (see next section).
 
 ## 5) Load Preset Files
@@ -37,8 +37,8 @@ Steps:
 ## 6) Recommended First Run
 - Start on **demo** for 2–4 weeks.
 - Review log files in **/Files/**:
-  - `MadRabbit_Decisions.csv`
-  - `MadRabbit_Trades.csv`
+  - `Scalper_Decisions.csv`
+  - `Scalper_Trades.csv`
 - Confirm:
   - Low drawdown
   - Few trades per day
@@ -63,5 +63,5 @@ Steps:
 ---
 If you need support, send:
 - Screenshot of MT5 chart + settings
-- `MadRabbit_Decisions.csv`
-- `MadRabbit_Trades.csv`
+- `Scalper_Decisions.csv`
+- `Scalper_Trades.csv`

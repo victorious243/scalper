@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                               Mad_Rabbit_Bot.mq5 |
+//|                                               Scalper_Bot.mq5 |
 //|               Disciplined, risk-first MT5 EA (H1 confluence)     |
 //+------------------------------------------------------------------+
 #property copyright ""
@@ -27,7 +27,7 @@ input int    ATR_Period              = 14;
 
 input int    EMA_Slope_Period        = 50;
 input int    EMA_Slope_Lookback      = 5;
-input double EMA_Slope_Threshold     = 5.0;   // pips over lookback
+input double EMA_Slope_Threshold     = 4.0;   // pips over lookback
 input ENUM_TIMEFRAMES Analysis_Timeframe = PERIOD_M30;
 
 input double Min_SL_Pips             = 30.0;
@@ -36,9 +36,9 @@ input double Min_TP_Pips             = 60.0;
 input double Max_TP_Pips             = 80.0;
 input double Min_RR                  = 2.0;
 
-input double Max_Spread_Pips_Metals  = 35.0;
-input double Max_Spread_Pips_FX      = 2.0;
-input double ATR_Min_Pips            = 10.0;
+input double Max_Spread_Pips_Metals  = 40.0;
+input double Max_Spread_Pips_FX      = 2.5;
+input double ATR_Min_Pips            = 4.0;
 input double ATR_Max_Pips            = 200.0;
 input int    ATR_Regime_Period       = 20;
 input bool   Enable_Adaptive_Filters = true;
@@ -58,8 +58,12 @@ input int    NY_End_Hour             = 16;
 input bool   Reduce_Asian_Risk        = true;
 input double Asian_Risk_Multiplier    = 0.5;
 
-input int    Confidence_Threshold_Metals = 75;
-input int    Confidence_Threshold_FX     = 70;
+input int    Confidence_Threshold_Metals = 70;
+input int    Confidence_Threshold_FX     = 65;
+input double Entry_RSI_Buy_Max        = 45.0;
+input double Entry_RSI_Sell_Min       = 55.0;
+input double Entry_SR_Max_Distance_Pips = 25.0;
+input bool   Entry_Require_MACD_Align = true;
 input bool   Enable_DD_Throttle      = true;
 input double DD_Throttle_Start_Pct   = 2.0;
 input double DD_Throttle_Full_Pct    = 8.0;
@@ -82,7 +86,7 @@ input string Allowed_Symbols = "XAUUSD,EURUSD,GBPUSD,USDJPY";
 
 // Very selective mode
 enum TradeMode { CONSERVATIVE=0, BALANCED=1, ACTIVE=2 };
-input TradeMode Mode = CONSERVATIVE;
+input TradeMode Mode = BALANCED;
 
 // Telegram notifications
 input bool   Telegram_Enable          = false;
@@ -100,10 +104,11 @@ input string AI_Endpoint              = "https://api.openai.com/v1/chat/completi
 input string AI_API_Key               = "";
 input string AI_OpenAI_URL            = "https://api.openai.com/v1/chat/completions";
 input string AI_OpenAI_Model          = "gpt-4o-mini";
-input string AI_OpenAI_System_Prompt  = "You are a cautious trading signal engine. Return strict JSON only with keys: id,symbol,signal,confidence,sl,tp,expires_unix,reason.";
+input string AI_OpenAI_System_Prompt  = "You are a disciplined trading signal engine. Return strict JSON only with keys: id,symbol,signal,confidence,sl,tp,expires_unix,reason. Prefer NO_TRADE unless setup quality is clear.";
 input int    AI_Poll_Seconds          = 300;   // 5 minutes
 input int    AI_HTTP_Timeout_Ms       = 5000;
-input int    AI_Min_Confidence        = 70;
+input int    AI_Auth_Backoff_Seconds  = 600;   // pause after auth errors
+input int    AI_Min_Confidence        = 62;
 input int    AI_Signal_TTL_Seconds    = 900;   // fallback TTL if API does not send expiry
 input bool   Enable_AI_Advisory       = true;
 input double AI_Advisory_Weight       = 0.35;
@@ -120,6 +125,9 @@ input double Partial_Close_Percent     = 50.0;  // % volume to close
 input bool   Enable_Trailing           = true;
 input double Trail_Start_RR            = 1.5;   // start trailing at >= this RR
 input double Trail_Step_Pips           = 10.0;  // trail step (pips)
+input bool   Enable_Quick_Profit_Exit  = true;
+input double Quick_Profit_Close_RR     = 1.1;
+input bool   Quick_Profit_Require_Rejection = true;
 
 // Support/Resistance caching (analysis timeframe)
 input int    SR_Lookback_Bars          = 200;
@@ -146,6 +154,7 @@ string g_last_regime = "UNKNOWN";
 string g_last_lock_reason = "";
 datetime g_last_telegram_time = 0;
 datetime g_last_ai_poll_time = 0;
+datetime g_ai_auth_block_until = 0;
 string g_last_ai_signal_id = "";
 string g_last_ai_executed_id = "";
 string g_last_ai_signal = "NONE";
@@ -194,9 +203,9 @@ int atr_handle = INVALID_HANDLE;
 int ema_handle = INVALID_HANDLE;
 
 // Logging
-string LOG_DECISIONS = "MadRabbit_Decisions.csv";
-string LOG_TRADES = "MadRabbit_Trades.csv";
-string LOG_EVAL = "MadRabbit_Log.csv";
+string LOG_DECISIONS = "Scalper_Decisions.csv";
+string LOG_TRADES = "Scalper_Trades.csv";
+string LOG_EVAL = "Scalper_Log.csv";
 
 // ---- Helpers ----
 double PipSize(const string symbol)
@@ -503,7 +512,14 @@ int DynamicThresholdBump()
 
 int DynamicScoreThreshold(const int base)
 {
-   return base + DynamicThresholdBump();
+   int modeAdjust = 0;
+   if(Mode == BALANCED) modeAdjust = -4;
+   else if(Mode == ACTIVE) modeAdjust = -8;
+
+   int threshold = base + DynamicThresholdBump() + modeAdjust;
+   if(threshold < 45) threshold = 45;
+   if(threshold > 100) threshold = 100;
+   return threshold;
 }
 
 int DynamicAIMinConfidence()
@@ -600,6 +616,13 @@ bool IsOpenAIEndpoint(const string endpoint)
    return (StringFind(u, "API.OPENAI.COM") >= 0 || StringFind(u, "/CHAT/COMPLETIONS") >= 0);
 }
 
+bool LooksLikeOpenAIKey(const string key)
+{
+   string k = TrimCopy(key);
+   if(StringLen(k) < 20) return false;
+   return (StringFind(k, "sk-") == 0);
+}
+
 bool PollAISignal(AISignal &sig, double atr_pips, double ema_slope_pips)
 {
    sig = EmptyAISignal();
@@ -616,6 +639,12 @@ bool PollAISignal(AISignal &sig, double atr_pips, double ema_slope_pips)
    }
 
    datetime now = TimeCurrent();
+   if(g_ai_auth_block_until > now)
+   {
+      g_last_ai_status = "AUTH_BACKOFF";
+      g_last_ai_reason = "WAIT_UNTIL_" + TimeToString(g_ai_auth_block_until, TIME_SECONDS);
+      return false;
+   }
    if(g_last_ai_poll_time > 0 && (now - g_last_ai_poll_time) < AI_Poll_Seconds)
    {
       g_last_ai_status = "WAIT_POLL_WINDOW";
@@ -636,6 +665,12 @@ bool PollAISignal(AISignal &sig, double atr_pips, double ema_slope_pips)
       return false;
    }
    bool useOpenAI = (provider == AI_PROVIDER_OPENAI || IsOpenAIEndpoint(endpoint));
+   if(useOpenAI && !LooksLikeOpenAIKey(AI_API_Key))
+   {
+      g_last_ai_status = "BAD_API_KEY_FORMAT";
+      g_last_ai_reason = "EXPECTED_OPENAI_KEY";
+      return false;
+   }
 
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -702,7 +737,17 @@ bool PollAISignal(AISignal &sig, double atr_pips, double ema_slope_pips)
    if(code < 200 || code >= 300)
    {
       g_last_ai_status = "HTTP_" + IntegerToString(code);
-      g_last_ai_reason = CompactForLog(body, 220);
+      string errReason = CompactForLog(body, 220);
+      if(errReason == "")
+      {
+         string providerTag = useOpenAI ? "OPENAI" : "RELAY";
+         errReason = "HTTP_BODY_EMPTY endpoint=" + CompactForLog(endpoint, 120) + " provider=" + providerTag;
+      }
+      g_last_ai_reason = errReason;
+      if(code == 401 || code == 403)
+      {
+         g_ai_auth_block_until = now + MathMax(60, AI_Auth_Backoff_Seconds);
+      }
       return false;
    }
    if(body == "")
@@ -846,6 +891,8 @@ bool IsSpreadOK()
    double spread = GetSpreadInPips(_Symbol);
    double maxSpread = g_dynamic_spread_max;
    if(maxSpread <= 0.0) maxSpread = IsMetals() ? Max_Spread_Pips_Metals : Max_Spread_Pips_FX;
+   if(Mode == BALANCED) maxSpread *= 1.10;
+   else if(Mode == ACTIVE) maxSpread *= 1.20;
    return spread <= maxSpread;
 }
 
@@ -853,6 +900,16 @@ bool AtrOk(double atr_pips)
 {
    double minAtr = g_dynamic_atr_min > 0.0 ? g_dynamic_atr_min : ATR_Min_Pips;
    double maxAtr = g_dynamic_atr_max > 0.0 ? g_dynamic_atr_max : ATR_Max_Pips;
+   if(Mode == BALANCED)
+   {
+      minAtr *= 0.75;
+      maxAtr *= 1.10;
+   }
+   else if(Mode == ACTIVE)
+   {
+      minAtr *= 0.60;
+      maxAtr *= 1.20;
+   }
    return (atr_pips >= minAtr && atr_pips <= maxAtr);
 }
 
@@ -933,7 +990,10 @@ bool IsTrendRegime(double ema_slope_pips)
 
 bool IsLowVolRegime(double atr_pips, double atr_sma_pips)
 {
-   return atr_pips < atr_sma_pips * 0.7;
+   double factor = 0.70;
+   if(Mode == BALANCED) factor = 0.62;
+   else if(Mode == ACTIVE) factor = 0.55;
+   return atr_pips < atr_sma_pips * factor;
 }
 
 // --- S/R cache (per-chart symbol) ---
@@ -943,7 +1003,7 @@ int    g_zone_count = 0;
 datetime g_last_sr_update = 0;
 
 // --- Trade management helpers ---
-ulong  g_magic = 240131; // Mad Rabbit magic number
+ulong  g_magic = 240131; // Scalper magic number
 
 ScoreBreakdown EmptyScore()
 {
@@ -1173,6 +1233,20 @@ void ManageOpenPositions()
 
       double rr = (type==POSITION_TYPE_BUY) ? (price-entry)/risk_dist : (entry-price)/risk_dist;
 
+      // Close winners early when profit target quality is met.
+      if(Enable_Quick_Profit_Exit && rr >= Quick_Profit_Close_RR)
+      {
+         bool close_now = true;
+         if(Quick_Profit_Require_Rejection)
+            close_now = (type == POSITION_TYPE_BUY) ? RejectionCandle(false) : RejectionCandle(true);
+         if(close_now)
+         {
+            trade.SetExpertMagicNumber(g_magic);
+            trade.PositionClose(ticket);
+            continue;
+         }
+      }
+
       // Partial close
       if(Enable_Partial_Close && rr >= Partial_Close_RR)
       {
@@ -1384,8 +1458,8 @@ bool EvaluateAI()
    trade.SetExpertMagicNumber(g_magic);
    trade.SetDeviationInPoints(10);
    bool ok = false;
-   if(buy) ok = trade.Buy(lot, _Symbol, ask, sl, tp, "MadRabbit_AI");
-   if(sell) ok = trade.Sell(lot, _Symbol, bid, sl, tp, "MadRabbit_AI");
+   if(buy) ok = trade.Buy(lot, _Symbol, ask, sl, tp, "Scalper_AI");
+   if(sell) ok = trade.Sell(lot, _Symbol, bid, sl, tp, "Scalper_AI");
 
    ScoreBreakdown aiScore = EmptyScore();
    aiScore.total = (int)MathRound(ai.confidence);
@@ -1398,7 +1472,7 @@ bool EvaluateAI()
       g_last_score = aiScore.total;
       LogTradeCSV(buy ? "BUY" : "SELL", lot, entry, sl, tp, aiScore);
       LogDecisionCSV(buy ? "BUY" : "SELL", aiScore, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
-      TelegramSend(StringFormat("Mad Rabbit AI %s %s | Conf %.1f | SL %.5f TP %.5f", _Symbol, buy ? "BUY" : "SELL", ai.confidence, sl, tp));
+      TelegramSend(StringFormat("Scalper AI %s %s | Conf %.1f | SL %.5f TP %.5f", _Symbol, buy ? "BUY" : "SELL", ai.confidence, sl, tp));
    }
    else
    {
@@ -1472,8 +1546,18 @@ void Evaluate()
 
    double dist_support = NearestSRDistancePips(true, bid);
    double dist_resist  = NearestSRDistancePips(false, ask);
-   bool buy_setup = (rsi_buff[1] < 40 && dist_support <= 20);
-   bool sell_setup = (rsi_buff[1] > 60 && dist_resist <= 20);
+   bool buy_setup = (rsi_buff[1] <= Entry_RSI_Buy_Max && dist_support <= Entry_SR_Max_Distance_Pips);
+   bool sell_setup = (rsi_buff[1] >= Entry_RSI_Sell_Min && dist_resist <= Entry_SR_Max_Distance_Pips);
+   if(Entry_Require_MACD_Align)
+   {
+      buy_setup = buy_setup && (macd_main[1] > macd_signal[1]);
+      sell_setup = sell_setup && (macd_main[1] < macd_signal[1]);
+   }
+   if(g_last_regime == "TREND")
+   {
+      if(ema_slope_pips > 0.0) sell_setup = false;
+      if(ema_slope_pips < 0.0) buy_setup = false;
+   }
    if(!buy_setup && !sell_setup) { g_last_lock_reason = "NO_SETUP"; LogDecisionCSV("SKIP", EmptyScore(), GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips); return; }
 
    bool buy_rej = RejectionCandle(true);
@@ -1551,8 +1635,8 @@ void Evaluate()
    trade.SetExpertMagicNumber(g_magic);
    trade.SetDeviationInPoints(10);
    bool ok = false;
-   if(buy) ok = trade.Buy(lot, _Symbol, ask, sl, tp, "MadRabbit");
-   if(sell) ok = trade.Sell(lot, _Symbol, bid, sl, tp, "MadRabbit");
+   if(buy) ok = trade.Buy(lot, _Symbol, ask, sl, tp, "Scalper");
+   if(sell) ok = trade.Sell(lot, _Symbol, bid, sl, tp, "Scalper");
 
    if(ok)
    {
@@ -1560,7 +1644,7 @@ void Evaluate()
       if(IsMetals()) g_trades_today_metals++; else g_trades_today_fx++;
       LogTradeCSV(buy ? "BUY" : "SELL", lot, entry, sl, tp, buy ? score_buy : score_sell);
       LogDecisionCSV(buy ? "BUY" : "SELL", buy ? score_buy : score_sell, GetSpreadInPips(_Symbol), atr_pips, ema_slope_pips);
-      TelegramSend(StringFormat("Mad Rabbit %s %s | Score %d | SL %.5f TP %.5f", _Symbol, buy ? "BUY" : "SELL", g_last_score, sl, tp));
+      TelegramSend(StringFormat("Scalper %s %s | Score %d | SL %.5f TP %.5f", _Symbol, buy ? "BUY" : "SELL", g_last_score, sl, tp));
    }
    else
    {
@@ -1580,7 +1664,7 @@ void UpdateDashboard()
    else if(IsAsianSession() && Reduce_Asian_Risk) risk_mode = "Reduced";
 
    Comment(
-      "Mad Rabbit | ", _Symbol, "\n",
+      "Scalper | ", _Symbol, "\n",
       "Daily PnL: ", DoubleToString(pnl_pct, 2), "%\n",
       "Drawdown: ", DoubleToString(dd_pct, 2), "%\n",
       "Active Trades: ", PositionsTotal(), "\n",
@@ -1610,7 +1694,7 @@ int OnInit()
    g_peak_equity = g_day_start_equity;
 
    if(Telegram_Test_OnInit && Telegram_Enable)
-      TelegramSend("Mad Rabbit EA started on " + _Symbol);
+      TelegramSend("Scalper EA started on " + _Symbol);
 
    RefreshAdaptiveLimits();
    EventSetTimer(Scan_Interval_Seconds);

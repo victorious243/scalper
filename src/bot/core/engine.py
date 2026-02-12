@@ -39,7 +39,12 @@ class BotEngine:
         self.observer = MarketObserver(config)
         self.risk = HardRiskManager(config, adapter)
         self.execution = ExecutionEngine(adapter, logger)
-        self.supervisor = TradeSupervisor(adapter, self.risk)
+        self.supervisor = TradeSupervisor(
+            adapter,
+            self.risk,
+            close_on_good_profit=config.close_on_good_profit,
+            good_profit_rr=config.good_profit_rr,
+        )
         self.news = NewsRiskFilter(config.news_risk_window_minutes, config.news_window_pre_minutes, config.news_window_post_minutes)
         self.news.load_schedule(config.news_schedule_path)
         self.ml_filter = ml_filter or MLFilter()

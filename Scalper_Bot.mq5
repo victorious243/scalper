@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                               Scalper_Bot.mq5    |
-//|               Disciplined, risk-first MT5 EA (H1 confluence)     |
+//|                Disciplined, risk-first MT5 EA (M5 scalping)      |
 //+------------------------------------------------------------------+
 #property copyright ""
 #property version   "1.1"
@@ -17,7 +17,7 @@ input double Daily_Loss_Limit_Pct    = 1.0;    // stop trading if reached
 input double Max_Drawdown_Pct        = 15.0;   // hard kill-switch
 input int    Max_Trades_Per_Day      = 20;
 input int    Max_Concurrent_Trades   = 3;
-input int    Scan_Interval_Seconds   = 10;
+input int    Scan_Interval_Seconds   = 5;
 
 input int    RSI_Period              = 14;
 input int    MACD_Fast               = 12;
@@ -27,19 +27,19 @@ input int    ATR_Period              = 14;
 
 input int    EMA_Slope_Period        = 50;
 input int    EMA_Slope_Lookback      = 5;
-input double EMA_Slope_Threshold     = 5.0;   // pips over lookback
-input ENUM_TIMEFRAMES Analysis_Timeframe = PERIOD_M30;
+input double EMA_Slope_Threshold     = 1.8;   // pips over lookback (M5 profile)
+input ENUM_TIMEFRAMES Analysis_Timeframe = PERIOD_M5;
 
-input double Min_SL_Pips             = 10.0;
-input double Max_SL_Pips             = 25.0;
-input double Min_TP_Pips             = 12.0;
-input double Max_TP_Pips             = 35.0;
-input double Min_RR                  = 1.2;
+input double Min_SL_Pips             = 6.0;
+input double Max_SL_Pips             = 18.0;
+input double Min_TP_Pips             = 8.0;
+input double Max_TP_Pips             = 24.0;
+input double Min_RR                  = 1.15;
 
 input double Max_Spread_Pips_Metals  = 35.0;
-input double Max_Spread_Pips_FX      = 2.8;
-input double ATR_Min_Pips            = 2.5;
-input double ATR_Max_Pips            = 200.0;
+input double Max_Spread_Pips_FX      = 2.2;
+input double ATR_Min_Pips            = 1.8;
+input double ATR_Max_Pips            = 120.0;
 input int    ATR_Regime_Period       = 20;
 input bool   Enable_Adaptive_Filters = true;
 input int    Adaptive_ATR_Lookback_Bars = 120;
@@ -58,12 +58,12 @@ input int    NY_End_Hour             = 16;
 input bool   Reduce_Asian_Risk        = true;
 input double Asian_Risk_Multiplier    = 0.5;
 
-input int    Confidence_Threshold_Metals = 56;
-input int    Confidence_Threshold_FX     = 52;
-input double Entry_RSI_Buy_Max        = 50.0;
-input double Entry_RSI_Sell_Min       = 50.0;
-input double Entry_SR_Max_Distance_Pips = 45.0;
-input bool   Entry_Require_MACD_Align = false;
+input int    Confidence_Threshold_Metals = 54;
+input int    Confidence_Threshold_FX     = 50;
+input double Entry_RSI_Buy_Max        = 53.0;
+input double Entry_RSI_Sell_Min       = 47.0;
+input double Entry_SR_Max_Distance_Pips = 35.0;
+input bool   Entry_Require_MACD_Align = true;
 input bool   Entry_Require_Trend_Direction = false;
 input bool   Enable_DD_Throttle      = true;
 input double DD_Throttle_Start_Pct   = 2.0;
@@ -87,7 +87,7 @@ input string Allowed_Symbols = "XAUUSD,EURUSD,GBPUSD,USDJPY";
 
 // Very selective mode
 enum TradeMode { CONSERVATIVE=0, BALANCED=1, ACTIVE=2 };
-input TradeMode Mode = ACTIVE;
+input TradeMode Mode = BALANCED;
 
 // Telegram notifications
 input bool   Telegram_Enable          = false;
@@ -123,13 +123,13 @@ input bool   Enable_Partial_Close      = true;
 input double Partial_Close_RR          = 1.0;   // partial at >= this RR
 input double Partial_Close_Percent     = 50.0;  // % volume to close
 input bool   Enable_Trailing           = true;
-input double Trail_Start_RR            = 1.5;   // start trailing at >= this RR
-input double Trail_Step_Pips           = 10.0;  // trail step (pips)
+input double Trail_Start_RR            = 1.1;   // start trailing at >= this RR
+input double Trail_Step_Pips           = 5.0;   // trail step (pips)
 input bool   Enable_Quick_Profit_Exit  = true;  // do not let good trades roundtrip
-input double Quick_Profit_Close_RR     = 0.8;
+input double Quick_Profit_Close_RR     = 0.7;
 input bool   Quick_Profit_Require_Rejection = false;
 input bool   Enable_Time_Exit          = true;  // scalper timeout
-input int    Max_Hold_Minutes          = 120;
+input int    Max_Hold_Minutes          = 90;
 
 // Support/Resistance caching (analysis timeframe)
 input int    SR_Lookback_Bars          = 200;
@@ -950,7 +950,7 @@ bool IsTrendRegime(double ema_slope_pips)
 
 bool IsLowVolRegime(double atr_pips, double atr_sma_pips)
 {
-   return atr_pips < atr_sma_pips * 0.7;
+   return atr_pips < atr_sma_pips * 0.6;
 }
 
 // --- S/R cache (per-chart symbol) ---
